@@ -1,3 +1,13 @@
+## START: Set by rpmautospec
+## (rpmautospec version 0.3.5)
+## RPMAUTOSPEC: autorelease, autochangelog
+%define autorelease(e:s:pb:n) %{?-p:0.}%{lua:
+    release_number = 1;
+    base_release_number = tonumber(rpm.expand("%{?-b*}%{!?-b:1}"));
+    print(release_number + base_release_number - 1);
+}%{?-e:.%{-e*}}%{?-s:.%{-s*}}%{!?-n:%{?dist}}
+## END: Set by rpmautospec
+
 %global glib_version 2.75.1
 %global gtk3_version 3.19.8
 %global gtk4_version 4.0.0
@@ -9,10 +19,12 @@
 %global colord_version 1.4.5
 %global mutter_api_version 12
 
-%global tarball_version %%(echo %{version} | tr '~' '.')
+%global gnome_version 44.2
+%global tarball_version %%(echo %{gnome_version} | tr '~' '.')
+
 
 Name:          mutter
-Version:       44.2
+Version:       %{gnome_version}.triplebuffer.2
 Release:       %autorelease
 Summary:       Window and compositing manager based on Clutter
 
@@ -28,6 +40,31 @@ Patch1:        mutter-42.alpha-disable-tegra.patch
 
 # https://pagure.io/fedora-workstation/issue/79
 Patch2:        0001-place-Always-center-initial-setup-fedora-welcome.patch
+
+# Support Dynamic triple/double buffering
+# https://gitlab.gnome.org/GNOME/mutter/-/merge_requests/1441
+Patch3:        1441.patch
+# Cherry-picked on top of gnome-44 branch
+# Includes post-44.2 changes in gnome-44 branch
+
+# Backports for 44.3
+# https://gitlab.gnome.org/GNOME/mutter/-/merge_requests/3056
+Patch4:        3056.patch
+# Implement physical pixel rounding of Wayland surfaces for compliance with fractional-scale-v1
+# https://gitlab.gnome.org/GNOME/mutter/-/merge_requests/2726
+# GPU optimizations for partial surface update
+# https://gitlab.gnome.org/GNOME/mutter/-/merge_requests/2965
+# clutter: Optimize the finish-layout step during stage updating
+# https://gitlab.gnome.org/GNOME/mutter/-/merge_requests/2679
+
+# window-actor: Fix screencast with fractionally scaled surfaces
+# https://gitlab.gnome.org/GNOME/mutter/-/merge_requests/3053
+Patch5:        3053.patch
+
+# clutter/frame-clock: Avoid rapidly toggling dynamic max render time
+# https://gitlab.gnome.org/GNOME/mutter/-/merge_requests/3074
+Patch6:        3074.patch
+# Updated for triple buffering patch
 
 BuildRequires: pkgconfig(gobject-introspection-1.0) >= 1.41.0
 BuildRequires: pkgconfig(sm)

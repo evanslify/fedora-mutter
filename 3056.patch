@@ -1,0 +1,3277 @@
+From df640fd156719fd0d176b9746c3ac52696953bf8 Mon Sep 17 00:00:00 2001
+From: msizanoen1 <msizanoen@qtmlabs.xyz>
+Date: Sun, 4 Dec 2022 11:14:21 +0700
+Subject: [PATCH 01/23] clutter/actor: Introduce notify_transform_invalid
+
+This allows clients to maybe avoid triggering a redraw if they don't know
+beforehand if the transform would actually change.
+
+Part-of: <https://gitlab.gnome.org/GNOME/mutter/-/merge_requests/2726>
+
+(cherry picked from commit ddc5de610b0b7f82851bc143c73cf8f242b81b1c)
+---
+ clutter/clutter/clutter-actor.c  | 33 ++++++++++++++++++++++++++++++++
+ clutter/clutter/clutter-mutter.h |  3 +++
+ 2 files changed, 36 insertions(+)
+
+diff --git a/clutter/clutter/clutter-actor.c b/clutter/clutter/clutter-actor.c
+index dca11933126..38693e3d4d1 100644
+--- a/clutter/clutter/clutter-actor.c
++++ b/clutter/clutter/clutter-actor.c
+@@ -19186,3 +19186,36 @@ void clutter_actor_set_implicitly_grabbed (ClutterActor *self,
+ 
+   g_assert (priv->implicitly_grabbed_count >= 0);
+ }
++
++/**
++ * clutter_actor_notify_transform_invalid:
++ * @self: A #ClutterActor
++ *
++ * Invalidate the cached transformation matrix of @self and queue a redraw
++ * if the transformation matrix has changed.
++ * This is needed for implementations overriding the apply_transform()
++ * vfunc and has to be called if the matrix returned by apply_transform()
++ * would change due to state outside of the object itself.
++ */
++void
++clutter_actor_notify_transform_invalid (ClutterActor *self)
++{
++  ClutterActorPrivate *priv = self->priv;
++  graphene_matrix_t old_transform;
++
++  if (!priv->transform_valid)
++    {
++      clutter_actor_queue_redraw (self);
++      return;
++    }
++
++  graphene_matrix_init_from_matrix (&old_transform, &priv->transform);
++
++  transform_changed (self);
++  ensure_valid_actor_transform (self);
++
++  g_assert (priv->transform_valid);
++
++  if (!graphene_matrix_equal (&old_transform, &priv->transform))
++    clutter_actor_queue_redraw (self);
++}
+diff --git a/clutter/clutter/clutter-mutter.h b/clutter/clutter/clutter-mutter.h
+index 3250eb5d666..eb1ce19e5c8 100644
+--- a/clutter/clutter/clutter-mutter.h
++++ b/clutter/clutter/clutter-mutter.h
+@@ -132,6 +132,9 @@ void clutter_get_debug_flags (ClutterDebugFlag     *debug_flags,
+                               ClutterDrawDebugFlag *draw_flags,
+                               ClutterPickDebugFlag *pick_flags);
+ 
++CLUTTER_EXPORT
++void clutter_actor_notify_transform_invalid (ClutterActor *self);
++
+ #undef __CLUTTER_H_INSIDE__
+ 
+ #endif /* __CLUTTER_MUTTER_H__ */
+-- 
+GitLab
+
+
+From 800e819886eae96a49a0c345191d9a0bcee3d87b Mon Sep 17 00:00:00 2001
+From: msizanoen1 <msizanoen@qtmlabs.xyz>
+Date: Mon, 6 Mar 2023 06:43:13 +0100
+Subject: [PATCH 02/23] core/window: Track monitor with the highest scale value
+
+This is used for Wayland fractional scale pixel alignment.
+
+Part-of: <https://gitlab.gnome.org/GNOME/mutter/-/merge_requests/2726>
+
+(cherry picked from commit e4d7667c43c3c710508b58e31df4b79866ad04c2)
+---
+ src/backends/meta-monitor-manager-private.h |  3 ++
+ src/backends/meta-monitor-manager.c         | 41 ++++++++++++++++++
+ src/core/window-private.h                   |  2 +
+ src/core/window.c                           | 46 ++++++++++++++++++++-
+ 4 files changed, 91 insertions(+), 1 deletion(-)
+
+diff --git a/src/backends/meta-monitor-manager-private.h b/src/backends/meta-monitor-manager-private.h
+index f9cd9ae3128..763853c6a44 100644
+--- a/src/backends/meta-monitor-manager-private.h
++++ b/src/backends/meta-monitor-manager-private.h
+@@ -293,6 +293,9 @@ MetaLogicalMonitor *meta_monitor_manager_get_logical_monitor_at (MetaMonitorMana
+ MetaLogicalMonitor *meta_monitor_manager_get_logical_monitor_from_rect (MetaMonitorManager *manager,
+                                                                         MetaRectangle      *rect);
+ 
++MetaLogicalMonitor *meta_monitor_manager_get_highest_scale_monitor_from_rect (MetaMonitorManager *manager,
++                                                                              MetaRectangle      *rect);
++
+ MetaLogicalMonitor *meta_monitor_manager_get_logical_monitor_neighbor (MetaMonitorManager  *manager,
+                                                                        MetaLogicalMonitor  *logical_monitor,
+                                                                        MetaDisplayDirection direction);
+diff --git a/src/backends/meta-monitor-manager.c b/src/backends/meta-monitor-manager.c
+index bd02c55bbb6..cea76b71bfa 100644
+--- a/src/backends/meta-monitor-manager.c
++++ b/src/backends/meta-monitor-manager.c
+@@ -3399,6 +3399,47 @@ meta_monitor_manager_get_logical_monitor_from_rect (MetaMonitorManager *manager,
+   return best_logical_monitor;
+ }
+ 
++/**
++ * meta_monitor_manager_get_highest_scale_from_rect:
++ * @manager: A #MetaMonitorManager object
++ * @rect: The rectangle
++ *
++ * Finds the #MetaLogicalMonitor with the highest scale intersecting @rect.
++ *
++ * Returns: (transfer none) (nullable): the #MetaLogicalMonitor with the
++ *          highest scale intersecting with @rect, or %NULL if none.
++ */
++MetaLogicalMonitor *
++meta_monitor_manager_get_highest_scale_monitor_from_rect (MetaMonitorManager *manager,
++                                                          MetaRectangle      *rect)
++{
++  MetaLogicalMonitor *best_logical_monitor = NULL;
++  GList *l;
++  float best_scale = 0.0;
++
++  for (l = manager->logical_monitors; l; l = l->next)
++    {
++      MetaLogicalMonitor *logical_monitor = l->data;
++      MetaRectangle intersection;
++      float scale;
++
++      if (!meta_rectangle_intersect (&logical_monitor->rect,
++                                     rect,
++                                     &intersection))
++        continue;
++
++      scale = meta_logical_monitor_get_scale (logical_monitor);
++
++      if (scale > best_scale)
++        {
++          best_scale = scale;
++          best_logical_monitor = logical_monitor;
++        }
++    }
++
++  return best_logical_monitor;
++}
++
+ MetaLogicalMonitor *
+ meta_monitor_manager_get_logical_monitor_neighbor (MetaMonitorManager  *manager,
+                                                    MetaLogicalMonitor  *logical_monitor,
+diff --git a/src/core/window-private.h b/src/core/window-private.h
+index 1c12159727d..58ff69324b7 100644
+--- a/src/core/window-private.h
++++ b/src/core/window-private.h
+@@ -168,6 +168,7 @@ struct _MetaWindow
+   uint64_t id;
+   guint64 stamp;
+   MetaLogicalMonitor *monitor;
++  MetaLogicalMonitor *highest_scale_monitor;
+   MetaWorkspace *workspace;
+   MetaWindowClientType client_type;
+   Window xwindow;
+@@ -828,6 +829,7 @@ MetaLogicalMonitor * meta_window_find_monitor_from_frame_rect (MetaWindow *windo
+ MetaLogicalMonitor * meta_window_find_monitor_from_id (MetaWindow *window);
+ 
+ MetaLogicalMonitor * meta_window_get_main_logical_monitor (MetaWindow *window);
++MetaLogicalMonitor * meta_window_get_highest_scale_monitor (MetaWindow *window);
+ void meta_window_update_monitor (MetaWindow                   *window,
+                                  MetaWindowUpdateMonitorFlags  flags);
+ 
+diff --git a/src/core/window.c b/src/core/window.c
+index 6c9247743ac..33fc00b95f2 100644
+--- a/src/core/window.c
++++ b/src/core/window.c
+@@ -221,6 +221,7 @@ enum
+   SIZE_CHANGED,
+   POSITION_CHANGED,
+   SHOWN,
++  HIGHEST_SCALE_MONITOR_CHANGED,
+ 
+   LAST_SIGNAL
+ };
+@@ -755,6 +756,21 @@ meta_window_class_init (MetaWindowClass *klass)
+                   0,
+                   NULL, NULL, NULL,
+                   G_TYPE_NONE, 0);
++
++  /**
++   * MetaWindow::highest-scale-monitor-changed:
++   * @window: a #MetaWindow
++   *
++   * This is emitted when the monitor with the highest scale
++   * intersecting the window changes.
++   */
++  window_signals[HIGHEST_SCALE_MONITOR_CHANGED] =
++    g_signal_new ("highest-scale-monitor-changed",
++                  G_TYPE_FROM_CLASS (object_class),
++                  G_SIGNAL_RUN_LAST,
++                  0,
++                  NULL, NULL, NULL,
++                  G_TYPE_NONE, 0);
+ }
+ 
+ static void
+@@ -1007,6 +1023,19 @@ meta_window_find_monitor_from_frame_rect (MetaWindow *window)
+                                                              &window_rect);
+ }
+ 
++static MetaLogicalMonitor *
++meta_window_find_highest_scale_monitor_from_frame_rect (MetaWindow *window)
++{
++  MetaBackend *backend = backend_from_window (window);
++  MetaMonitorManager *monitor_manager =
++    meta_backend_get_monitor_manager (backend);
++  MetaRectangle window_rect;
++
++  meta_window_get_frame_rect (window, &window_rect);
++  return meta_monitor_manager_get_highest_scale_monitor_from_rect (monitor_manager,
++                                                                   &window_rect);
++}
++
+ static void
+ meta_window_manage (MetaWindow *window)
+ {
+@@ -1152,6 +1181,9 @@ meta_window_constructed (GObject *object)
+   else
+     window->monitor = meta_backend_get_current_logical_monitor (backend);
+ 
++  window->highest_scale_monitor =
++    meta_window_find_highest_scale_monitor_from_frame_rect (window);
++
+   if (window->monitor)
+     window->preferred_output_winsys_id = window->monitor->winsys_id;
+   else
+@@ -3582,6 +3614,12 @@ meta_window_get_main_logical_monitor (MetaWindow *window)
+   return window->monitor;
+ }
+ 
++MetaLogicalMonitor *
++meta_window_get_highest_scale_monitor (MetaWindow *window)
++{
++  return window->highest_scale_monitor;
++}
++
+ static MetaLogicalMonitor *
+ find_monitor_by_winsys_id (MetaWindow *window,
+                            uint64_t    winsys_id)
+@@ -3693,7 +3731,7 @@ meta_window_update_monitor (MetaWindow                   *window,
+                             MetaWindowUpdateMonitorFlags  flags)
+ {
+   MetaWorkspaceManager *workspace_manager = window->display->workspace_manager;
+-  const MetaLogicalMonitor *old;
++  const MetaLogicalMonitor *old, *old_highest_scale;
+ 
+   old = window->monitor;
+   META_WINDOW_GET_CLASS (window)->update_main_monitor (window, flags);
+@@ -3724,6 +3762,12 @@ meta_window_update_monitor (MetaWindow                   *window,
+ 
+       meta_display_queue_check_fullscreen (window->display);
+     }
++
++  old_highest_scale = window->highest_scale_monitor;
++  window->highest_scale_monitor =
++    meta_window_find_highest_scale_monitor_from_frame_rect (window);
++  if (old_highest_scale != window->highest_scale_monitor)
++    g_signal_emit (window, window_signals[HIGHEST_SCALE_MONITOR_CHANGED], 0);
+ }
+ 
+ void
+-- 
+GitLab
+
+
+From 2bf829421f3d194d80f9db57851d8bfa031d02da Mon Sep 17 00:00:00 2001
+From: msizanoen1 <msizanoen@qtmlabs.xyz>
+Date: Sat, 26 Nov 2022 16:22:05 +0700
+Subject: [PATCH 03/23] window-actor/wayland: Align window content to physical
+ pixel
+
+Always ensure that the MetaSurfaceContainerActorWayland is aligned to physical
+pixel boundary in preparation for fractional-scale-v1 protocol support.
+
+This introduces an override of ClutterActor::apply_transform vfunc for
+MetaSurfaceContainerActorWayland that always ensures the actor content is aligned
+to physical pixel boundary.
+
+Part-of: <https://gitlab.gnome.org/GNOME/mutter/-/merge_requests/2726>
+
+(cherry picked from commit ed90c78872dc92fcf373bdb171fa79f5235820a4)
+---
+ src/compositor/meta-window-actor-wayland.c | 92 ++++++++++++++++++++++
+ 1 file changed, 92 insertions(+)
+
+diff --git a/src/compositor/meta-window-actor-wayland.c b/src/compositor/meta-window-actor-wayland.c
+index a4b16d5a7a1..a74a19aba12 100644
+--- a/src/compositor/meta-window-actor-wayland.c
++++ b/src/compositor/meta-window-actor-wayland.c
+@@ -51,6 +51,7 @@ struct _MetaWindowActorWayland
+   MetaWindowActor parent;
+   ClutterActor *background;
+   MetaSurfaceContainerActorWayland *surface_container;
++  gulong highest_scale_monitor_handler_id;
+ };
+ 
+ static void cullable_iface_init (MetaCullableInterface *iface);
+@@ -123,6 +124,58 @@ surface_container_cullable_iface_init (MetaCullableInterface *iface)
+   iface->reset_culling = surface_container_reset_culling;
+ }
+ 
++static void
++surface_container_apply_transform (ClutterActor      *actor,
++                                   graphene_matrix_t *matrix)
++{
++  ClutterActor *parent = clutter_actor_get_parent (actor);
++  ClutterActorClass *parent_class =
++    CLUTTER_ACTOR_CLASS (meta_surface_container_actor_wayland_parent_class);
++  MetaWindow *window;
++  MetaLogicalMonitor *logical_monitor;
++  MetaRectangle monitor_rect;
++  float scale;
++  float rel_x, rel_y;
++  float abs_x, abs_y;
++  float adj_rel_x, adj_rel_y;
++  float x_off, y_off;
++
++  parent_class->apply_transform (actor, matrix);
++
++  if (!parent)
++    return;
++
++  window = meta_window_actor_get_meta_window (META_WINDOW_ACTOR (parent));
++  if (!window)
++    return;
++
++  logical_monitor = meta_window_get_highest_scale_monitor (window);
++  if (!logical_monitor)
++    return;
++
++  scale = meta_logical_monitor_get_scale (logical_monitor);
++  monitor_rect = meta_logical_monitor_get_layout (logical_monitor);
++
++  abs_x = clutter_actor_get_x (parent) + clutter_actor_get_x (actor);
++  abs_y = clutter_actor_get_y (parent) + clutter_actor_get_y (actor);
++
++  rel_x = abs_x - monitor_rect.x;
++  rel_y = abs_y - monitor_rect.y;
++
++  adj_rel_x = roundf (rel_x * scale) / scale;
++  adj_rel_y = roundf (rel_y * scale) / scale;
++
++  x_off = adj_rel_x - rel_x;
++  y_off = adj_rel_y - rel_y;
++
++  if (!G_APPROX_VALUE (x_off, 0.0, FLT_EPSILON) ||
++      !G_APPROX_VALUE (y_off, 0.0, FLT_EPSILON))
++    {
++      graphene_matrix_translate (matrix,
++                                 &GRAPHENE_POINT3D_INIT (x_off, y_off, 0));
++    }
++}
++
+ static void
+ surface_container_dispose (GObject *object)
+ {
+@@ -136,8 +189,11 @@ surface_container_dispose (GObject *object)
+ static void
+ meta_surface_container_actor_wayland_class_init (MetaSurfaceContainerActorWaylandClass *klass)
+ {
++  ClutterActorClass *actor_class = CLUTTER_ACTOR_CLASS (klass);
+   GObjectClass *object_class = G_OBJECT_CLASS (klass);
+ 
++  actor_class->apply_transform = surface_container_apply_transform;
++
+   object_class->dispose = surface_container_dispose;
+ }
+ 
+@@ -525,10 +581,39 @@ meta_window_actor_wayland_sync_geometry (MetaWindowActor     *actor,
+     }
+ }
+ 
++static void
++meta_window_actor_wayland_dispose (GObject *object)
++{
++  MetaWindowActorWayland *self = META_WINDOW_ACTOR_WAYLAND (object);
++  MetaWindow *window = meta_window_actor_get_meta_window (META_WINDOW_ACTOR (self));
++  GObjectClass *parent_class =
++    G_OBJECT_CLASS (meta_window_actor_wayland_parent_class);
++
++  g_clear_signal_handler (&self->highest_scale_monitor_handler_id,
++                          window);
++
++  parent_class->dispose (object);
++}
++
++static void
++meta_window_actor_wayland_constructed (GObject *object)
++{
++  MetaWindowActorWayland *self = META_WINDOW_ACTOR_WAYLAND (object);
++  MetaWindow *window = meta_window_actor_get_meta_window (META_WINDOW_ACTOR (self));
++
++  G_OBJECT_CLASS (meta_window_actor_wayland_parent_class)->constructed (object);
++
++  self->highest_scale_monitor_handler_id =
++    g_signal_connect_swapped (window, "highest-scale-monitor-changed",
++                              G_CALLBACK (clutter_actor_notify_transform_invalid),
++                              self->surface_container);
++}
++
+ static void
+ meta_window_actor_wayland_class_init (MetaWindowActorWaylandClass *klass)
+ {
+   MetaWindowActorClass *window_actor_class = META_WINDOW_ACTOR_CLASS (klass);
++  GObjectClass *object_class = G_OBJECT_CLASS (klass);
+ 
+   window_actor_class->get_scanout_candidate = meta_window_actor_wayland_get_scanout_candidate;
+   window_actor_class->assign_surface_actor = meta_window_actor_wayland_assign_surface_actor;
+@@ -542,6 +627,9 @@ meta_window_actor_wayland_class_init (MetaWindowActorWaylandClass *klass)
+   window_actor_class->can_freeze_commits = meta_window_actor_wayland_can_freeze_commits;
+   window_actor_class->sync_geometry = meta_window_actor_wayland_sync_geometry;
+   window_actor_class->is_single_surface_actor = meta_window_actor_wayland_is_single_surface_actor;
++
++  object_class->constructed = meta_window_actor_wayland_constructed;
++  object_class->dispose = meta_window_actor_wayland_dispose;
+ }
+ 
+ static void
+@@ -551,4 +639,8 @@ meta_window_actor_wayland_init (MetaWindowActorWayland *self)
+ 
+   clutter_actor_add_child (CLUTTER_ACTOR (self),
+                            CLUTTER_ACTOR (self->surface_container));
++
++  g_signal_connect_swapped (self, "notify::allocation",
++                            G_CALLBACK (clutter_actor_notify_transform_invalid),
++                            self->surface_container);
+ }
+-- 
+GitLab
+
+
+From 2797e03f57e3e354805067ec0f125129fec9d747 Mon Sep 17 00:00:00 2001
+From: msizanoen1 <msizanoen@qtmlabs.xyz>
+Date: Sat, 26 Nov 2022 18:33:46 +0700
+Subject: [PATCH 04/23] surface-actor/wayland: Implement stable size and
+ position rounding
+
+Implement the stable rounding algorithm as described in the discussions
+for the fractional-scale-v1 protocol.
+
+This adds an override of the ClutterActor::apply_transform vfunc for
+MetaSurfaceActorWayland that ensures the size and position of the
+contents of the surface are rounded according to the stable rounding
+algorithm.
+
+Part-of: <https://gitlab.gnome.org/GNOME/mutter/-/merge_requests/2726>
+
+(cherry picked from commit e94b5277772c45320929aad1e6af815e09109bab)
+---
+ src/compositor/meta-surface-actor-wayland.c | 104 ++++++++++++++++++++
+ src/wayland/meta-wayland-shell-surface.c    |   9 ++
+ src/wayland/meta-wayland-subsurface.c       |   4 +
+ src/wayland/meta-wayland-surface.c          |  20 ++++
+ src/wayland/meta-wayland-surface.h          |   2 +
+ 5 files changed, 139 insertions(+)
+
+diff --git a/src/compositor/meta-surface-actor-wayland.c b/src/compositor/meta-surface-actor-wayland.c
+index a9e5ea3d96a..22266a988e5 100644
+--- a/src/compositor/meta-surface-actor-wayland.c
++++ b/src/compositor/meta-surface-actor-wayland.c
+@@ -36,6 +36,7 @@
+ #include "compositor/region-utils.h"
+ #include "wayland/meta-wayland-buffer.h"
+ #include "wayland/meta-wayland-private.h"
++#include "wayland/meta-wayland-subsurface.h"
+ #include "wayland/meta-window-wayland.h"
+ 
+ struct _MetaSurfaceActorWayland
+@@ -162,6 +163,106 @@ meta_surface_actor_wayland_is_view_primary (MetaSurfaceActor *actor,
+   return current_primary_view == stage_view;
+ }
+ 
++static void
++meta_surface_actor_wayland_apply_transform (ClutterActor      *actor,
++                                            graphene_matrix_t *matrix)
++{
++  MetaSurfaceActorWayland *self = META_SURFACE_ACTOR_WAYLAND (actor);
++  ClutterActorClass *parent_class =
++    CLUTTER_ACTOR_CLASS (meta_surface_actor_wayland_parent_class);
++  MetaWaylandSurface *surface = meta_surface_actor_wayland_get_surface (self);
++  MetaWaylandSurface *root_surface;
++  MetaWindow *window;
++  MetaLogicalMonitor *logical_monitor;
++  ClutterActorBox *allocation;
++  float scale;
++  float actor_width, actor_height;
++  float adj_actor_width, adj_actor_height;
++  float adj_actor_x, adj_actor_y;
++  float width_scale, height_scale;
++  float x_off, y_off;
++
++  if (!surface)
++    goto out;
++
++  root_surface = surface;
++  while (root_surface->output_state.parent)
++    root_surface = root_surface->output_state.parent;
++
++  window = meta_wayland_surface_get_window (root_surface);
++  if (!window)
++    goto out;
++
++  if (!META_IS_WINDOW_WAYLAND (window))
++    goto out;
++
++  logical_monitor = meta_window_get_highest_scale_monitor (window);
++  if (!logical_monitor)
++    goto out;
++
++  scale = meta_logical_monitor_get_scale (logical_monitor);
++
++  g_object_get (actor, "allocation", &allocation, NULL);
++
++  actor_width = clutter_actor_box_get_width (allocation);
++  actor_height = clutter_actor_box_get_height (allocation);
++
++  if (actor_width == 0.0 || actor_height == 0.0)
++    goto out;
++
++  /* We rely on MetaSurfaceActorContainerWayland to ensure that the toplevel
++   * surface on-display position is aligned to the physical pixel boundary.
++   */
++  if (META_IS_WAYLAND_SUBSURFACE (surface->role))
++    {
++      adj_actor_width =
++        roundf ((surface->sub.x + actor_width) * scale) / scale -
++        roundf (surface->sub.x * scale) / scale;
++      adj_actor_height =
++        roundf ((surface->sub.y + actor_height) * scale) / scale -
++        roundf (surface->sub.y * scale) / scale;
++
++      adj_actor_x = adj_actor_y = 0.0;
++
++      do
++        {
++          adj_actor_x += roundf (surface->sub.x * scale) / scale;
++          adj_actor_y += roundf (surface->sub.y * scale) / scale;
++
++          surface = surface->output_state.parent;
++        }
++      while (surface);
++    }
++  else
++    {
++      adj_actor_width = roundf (actor_width * scale) / scale;
++      adj_actor_height = roundf (actor_height * scale) / scale;
++      adj_actor_x = allocation->x1;
++      adj_actor_y = allocation->y1;
++    }
++
++  width_scale = adj_actor_width / actor_width;
++  height_scale = adj_actor_height / actor_height;
++
++  if (!G_APPROX_VALUE (width_scale, 1.0, FLT_EPSILON) ||
++      !G_APPROX_VALUE (height_scale, 1.0, FLT_EPSILON))
++    graphene_matrix_scale (matrix, width_scale, height_scale, 1.0);
++
++  parent_class->apply_transform (actor, matrix);
++
++  x_off = adj_actor_x - allocation->x1;
++  y_off = adj_actor_y - allocation->y1;
++
++  if (!G_APPROX_VALUE (x_off, 0.0, FLT_EPSILON) ||
++      !G_APPROX_VALUE (y_off, 0.0, FLT_EPSILON))
++    graphene_matrix_translate (matrix, &GRAPHENE_POINT3D_INIT (x_off, y_off, 0.0));
++
++  return;
++
++out:
++  parent_class->apply_transform (actor, matrix);
++}
++
+ static void
+ meta_surface_actor_wayland_dispose (GObject *object)
+ {
+@@ -186,11 +287,14 @@ static void
+ meta_surface_actor_wayland_class_init (MetaSurfaceActorWaylandClass *klass)
+ {
+   MetaSurfaceActorClass *surface_actor_class = META_SURFACE_ACTOR_CLASS (klass);
++  ClutterActorClass *actor_class = CLUTTER_ACTOR_CLASS (klass);
+   GObjectClass *object_class = G_OBJECT_CLASS (klass);
+ 
+   surface_actor_class->process_damage = meta_surface_actor_wayland_process_damage;
+   surface_actor_class->is_opaque = meta_surface_actor_wayland_is_opaque;
+ 
++  actor_class->apply_transform = meta_surface_actor_wayland_apply_transform;
++
+   object_class->dispose = meta_surface_actor_wayland_dispose;
+ }
+ 
+diff --git a/src/wayland/meta-wayland-shell-surface.c b/src/wayland/meta-wayland-shell-surface.c
+index db1b2190889..0bd285731c5 100644
+--- a/src/wayland/meta-wayland-shell-surface.c
++++ b/src/wayland/meta-wayland-shell-surface.c
+@@ -37,6 +37,7 @@ typedef struct _MetaWaylandShellSurfacePrivate
+   MetaWindow *window;
+ 
+   gulong unmanaging_handler_id;
++  gulong highest_scale_monitor_handler_id;
+ } MetaWaylandShellSurfacePrivate;
+ 
+ G_DEFINE_ABSTRACT_TYPE_WITH_PRIVATE (MetaWaylandShellSurface,
+@@ -106,6 +107,8 @@ clear_window (MetaWaylandShellSurface *shell_surface)
+ 
+   g_clear_signal_handler (&priv->unmanaging_handler_id,
+                           priv->window);
++  g_clear_signal_handler (&priv->highest_scale_monitor_handler_id,
++                          priv->window);
+   priv->window = NULL;
+ 
+   surface_actor = meta_wayland_surface_get_actor (surface);
+@@ -138,6 +141,12 @@ meta_wayland_shell_surface_set_window (MetaWaylandShellSurface *shell_surface,
+ 
+   priv->window = window;
+ 
++  priv->highest_scale_monitor_handler_id =
++    g_signal_connect_swapped (window, "highest-scale-monitor-changed",
++                              G_CALLBACK (meta_wayland_surface_notify_highest_scale_monitor),
++                              surface);
++  meta_wayland_surface_notify_highest_scale_monitor (surface);
++
+   surface_actor = meta_wayland_surface_get_actor (surface);
+   if (surface_actor)
+     clutter_actor_set_reactive (CLUTTER_ACTOR (surface_actor), TRUE);
+diff --git a/src/wayland/meta-wayland-subsurface.c b/src/wayland/meta-wayland-subsurface.c
+index a979713527f..98cb6591c7f 100644
+--- a/src/wayland/meta-wayland-subsurface.c
++++ b/src/wayland/meta-wayland-subsurface.c
+@@ -90,6 +90,8 @@ sync_actor_subsurface_state (MetaWaylandSurface *surface)
+     clutter_actor_show (actor);
+   else
+     clutter_actor_hide (actor);
++
++  clutter_actor_notify_transform_invalid (actor);
+ }
+ 
+ static gboolean
+@@ -555,6 +557,8 @@ wl_subcompositor_get_subsurface (struct wl_client   *client,
+   surface->sub.synchronous = TRUE;
+   surface->protocol_state.parent = parent;
+ 
++  meta_wayland_surface_notify_highest_scale_monitor (surface);
++
+   reference =
+     g_node_last_child (parent->protocol_state.subsurface_branch_node)->data;
+   queue_subsurface_placement (surface, reference,
+diff --git a/src/wayland/meta-wayland-surface.c b/src/wayland/meta-wayland-surface.c
+index abd5dae1550..ee1d34ccb22 100644
+--- a/src/wayland/meta-wayland-surface.c
++++ b/src/wayland/meta-wayland-surface.c
+@@ -2396,3 +2396,23 @@ meta_wayland_surface_get_compositor (MetaWaylandSurface *surface)
+ {
+   return surface->compositor;
+ }
++
++static void
++output_state_handle_highest_scale_monitor (MetaWaylandSurface *surface)
++{
++  MetaWaylandSurface *subsurface_surface;
++  MetaSurfaceActor *actor = meta_wayland_surface_get_actor (surface);
++
++  if (actor)
++    clutter_actor_notify_transform_invalid (CLUTTER_ACTOR (actor));
++
++  META_WAYLAND_SURFACE_FOREACH_SUBSURFACE (&surface->output_state,
++                                           subsurface_surface)
++    output_state_handle_highest_scale_monitor (subsurface_surface);
++}
++
++void
++meta_wayland_surface_notify_highest_scale_monitor (MetaWaylandSurface *surface)
++{
++  output_state_handle_highest_scale_monitor (surface);
++}
+diff --git a/src/wayland/meta-wayland-surface.h b/src/wayland/meta-wayland-surface.h
+index 91cc64c0b92..1f4dbd12d02 100644
+--- a/src/wayland/meta-wayland-surface.h
++++ b/src/wayland/meta-wayland-surface.h
+@@ -414,6 +414,8 @@ struct wl_resource * meta_wayland_surface_get_resource (MetaWaylandSurface *surf
+ 
+ MetaWaylandCompositor * meta_wayland_surface_get_compositor (MetaWaylandSurface *surface);
+ 
++void meta_wayland_surface_notify_highest_scale_monitor (MetaWaylandSurface *surface);
++
+ static inline MetaWaylandSurfaceState *
+ meta_wayland_surface_state_new (void)
+ {
+-- 
+GitLab
+
+
+From 16ac01c461e7727b785936b984bdab7daf26e823 Mon Sep 17 00:00:00 2001
+From: msizanoen1 <msizanoen@qtmlabs.xyz>
+Date: Sat, 17 Dec 2022 17:46:07 +0700
+Subject: [PATCH 05/23] clutter/paint-volume: Do not use nearest rounding for
+ actor bounds
+
+This ensures clipped redraw work properly with transformed actors.
+
+Part-of: <https://gitlab.gnome.org/GNOME/mutter/-/merge_requests/2726>
+
+(cherry picked from commit f671cec5149218aeda49c931a35a70c14f3e1986)
+---
+ clutter/clutter/clutter-paint-volume.c | 8 ++++----
+ 1 file changed, 4 insertions(+), 4 deletions(-)
+
+diff --git a/clutter/clutter/clutter-paint-volume.c b/clutter/clutter/clutter-paint-volume.c
+index e2f273ef335..e6d16da69d2 100644
+--- a/clutter/clutter/clutter-paint-volume.c
++++ b/clutter/clutter/clutter-paint-volume.c
+@@ -1069,10 +1069,10 @@ _clutter_paint_volume_get_stage_paint_box (const ClutterPaintVolume *pv,
+        * in this case.
+        */
+       clutter_paint_volume_free (&projected_pv);
+-      box->x1 = CLUTTER_NEARBYINT (box->x1);
+-      box->y1 = CLUTTER_NEARBYINT (box->y1);
+-      box->x2 = CLUTTER_NEARBYINT (box->x2);
+-      box->y2 = CLUTTER_NEARBYINT (box->y2);
++      box->x1 = floorf (box->x1);
++      box->y1 = floorf (box->y1);
++      box->x2 = ceilf (box->x2);
++      box->y2 = ceilf (box->y2);
+       return;
+     }
+ 
+-- 
+GitLab
+
+
+From 1105b832e98778b651689630cfbfe21ff44acd35 Mon Sep 17 00:00:00 2001
+From: msizanoen1 <msizanoen@qtmlabs.xyz>
+Date: Sat, 4 Mar 2023 21:00:01 +0700
+Subject: [PATCH 06/23] wayland: Use new highest scale monitor tracking for
+ fractional_scale_v1
+
+This ensures consistency with the surface pixel alignment transforms.
+
+Part-of: <https://gitlab.gnome.org/GNOME/mutter/-/merge_requests/2726>
+
+(cherry picked from commit ae403f2e9445ecf7fe197e1e9e30152284903a1e)
+---
+ src/wayland/meta-wayland-surface.c | 51 +++++++++++++++++-------------
+ 1 file changed, 29 insertions(+), 22 deletions(-)
+
+diff --git a/src/wayland/meta-wayland-surface.c b/src/wayland/meta-wayland-surface.c
+index ee1d34ccb22..bde48e4842c 100644
+--- a/src/wayland/meta-wayland-surface.c
++++ b/src/wayland/meta-wayland-surface.c
+@@ -1410,45 +1410,36 @@ surface_output_disconnect_signals (gpointer key,
+                                         surface);
+ }
+ 
+-static void
+-get_highest_output_scale (gpointer key,
+-                          gpointer value,
+-                          gpointer data)
+-{
+-  MetaWaylandOutput *wayland_output = value;
+-  MetaLogicalMonitor *logical_monitor =
+-    meta_wayland_output_get_logical_monitor (wayland_output);
+-  double *scale = data;
+-  double new_scale;
+-
+-  new_scale = meta_logical_monitor_get_scale (logical_monitor);
+-  if (new_scale > *scale)
+-    *scale = new_scale;
+-}
+-
+ double
+ meta_wayland_surface_get_highest_output_scale (MetaWaylandSurface *surface)
+ {
+   double scale = 0.0;
++  MetaWindow *window;
++  MetaLogicalMonitor *logical_monitor;
++
++  window = meta_wayland_surface_get_window (surface);
++  if (!window)
++    goto out;
+ 
+-  g_hash_table_foreach (surface->outputs, get_highest_output_scale, &scale);
++  logical_monitor = meta_window_get_highest_scale_monitor (window);
++  if (!logical_monitor)
++    goto out;
++
++  scale = meta_logical_monitor_get_scale (logical_monitor);
++
++out:
+   return scale;
+ }
+ 
+ void
+ meta_wayland_surface_update_outputs (MetaWaylandSurface *surface)
+ {
+-  double scale;
+-
+   if (!surface->compositor)
+     return;
+ 
+   g_hash_table_foreach (surface->compositor->outputs,
+                         update_surface_output_state,
+                         surface);
+-
+-  scale = meta_wayland_surface_get_highest_output_scale (surface);
+-  meta_wayland_fractional_scale_maybe_send_preferred_scale (surface, scale);
+ }
+ 
+ void
+@@ -2397,6 +2388,21 @@ meta_wayland_surface_get_compositor (MetaWaylandSurface *surface)
+   return surface->compositor;
+ }
+ 
++static void
++protocol_state_handle_highest_scale_monitor (MetaWaylandSurface *surface)
++{
++  MetaWaylandSurface *subsurface_surface;
++  double scale;
++
++  scale = meta_wayland_surface_get_highest_output_scale (surface);
++
++  meta_wayland_fractional_scale_maybe_send_preferred_scale (surface, scale);
++
++  META_WAYLAND_SURFACE_FOREACH_SUBSURFACE (&surface->protocol_state,
++                                           subsurface_surface)
++    protocol_state_handle_highest_scale_monitor (subsurface_surface);
++}
++
+ static void
+ output_state_handle_highest_scale_monitor (MetaWaylandSurface *surface)
+ {
+@@ -2415,4 +2421,5 @@ void
+ meta_wayland_surface_notify_highest_scale_monitor (MetaWaylandSurface *surface)
+ {
+   output_state_handle_highest_scale_monitor (surface);
++  protocol_state_handle_highest_scale_monitor (surface);
+ }
+-- 
+GitLab
+
+
+From 1691ce1877d78e9cc9fd44906dc84a127b641d62 Mon Sep 17 00:00:00 2001
+From: msizanoen1 <msizanoen@qtmlabs.xyz>
+Date: Sat, 3 Dec 2022 13:34:07 +0700
+Subject: [PATCH 07/23] clutter/actor: Publish
+ get_relative_transformation_matrix
+
+Part-of: <https://gitlab.gnome.org/GNOME/mutter/-/merge_requests/2726>
+
+(cherry picked from commit ab835787bdb20816e1560473d87ee0fc16660332)
+---
+ clutter/clutter/clutter-actor.c  | 28 ++++++++++++----------------
+ clutter/clutter/clutter-mutter.h |  5 +++++
+ 2 files changed, 17 insertions(+), 16 deletions(-)
+
+diff --git a/clutter/clutter/clutter-actor.c b/clutter/clutter/clutter-actor.c
+index 38693e3d4d1..e9034f87df1 100644
+--- a/clutter/clutter/clutter-actor.c
++++ b/clutter/clutter/clutter-actor.c
+@@ -1038,10 +1038,6 @@ static void clutter_actor_update_map_state       (ClutterActor  *self,
+                                                   MapStateChange change);
+ static void clutter_actor_unrealize_not_hiding   (ClutterActor *self);
+ 
+-static void _clutter_actor_get_relative_transformation_matrix (ClutterActor      *self,
+-                                                               ClutterActor      *ancestor,
+-                                                               graphene_matrix_t *matrix);
+-
+ static ClutterPaintVolume *_clutter_actor_get_paint_volume_mutable (ClutterActor *self);
+ 
+ static guint8   clutter_actor_get_paint_opacity_internal        (ClutterActor *self);
+@@ -2767,7 +2763,7 @@ clutter_actor_apply_relative_transform_to_point (ClutterActor             *self,
+       return;
+     }
+ 
+-  _clutter_actor_get_relative_transformation_matrix (self, ancestor, &matrix);
++  clutter_actor_get_relative_transformation_matrix (self, ancestor, &matrix);
+   cogl_graphene_matrix_project_point (&matrix,
+                                       &vertex->x,
+                                       &vertex->y,
+@@ -2798,7 +2794,7 @@ _clutter_actor_fully_transform_vertices (ClutterActor             *self,
+   /* Note: we pass NULL as the ancestor because we don't just want the modelview
+    * that gets us to stage coordinates, we want to go all the way to eye
+    * coordinates */
+-  _clutter_actor_get_relative_transformation_matrix (self, NULL, &modelview);
++  clutter_actor_get_relative_transformation_matrix (self, NULL, &modelview);
+ 
+   /* Fetch the projection and viewport */
+   _clutter_stage_get_projection_matrix (CLUTTER_STAGE (stage), &projection);
+@@ -2838,12 +2834,12 @@ clutter_actor_apply_transform_to_point (ClutterActor             *self,
+   _clutter_actor_fully_transform_vertices (self, point, vertex, 1);
+ }
+ 
+-/*
+- * _clutter_actor_get_relative_transformation_matrix:
++/**
++ * clutter_actor_get_relative_transformation_matrix:
+  * @self: The actor whose coordinate space you want to transform from.
+- * @ancestor: The ancestor actor whose coordinate space you want to transform too
++ * @ancestor: (nullable): The ancestor actor whose coordinate space you want to transform to
+  *            or %NULL if you want to transform all the way to eye coordinates.
+- * @matrix: A #graphene_matrix_t to store the transformation
++ * @matrix: (out caller-allocates): A #graphene_matrix_t to store the transformation
+  *
+  * This gets a transformation @matrix that will transform coordinates from the
+  * coordinate space of @self into the coordinate space of @ancestor.
+@@ -2867,10 +2863,10 @@ clutter_actor_apply_transform_to_point (ClutterActor             *self,
+  */
+ /* XXX: We should consider caching the stage relative modelview along with
+  * the actor itself */
+-static void
+-_clutter_actor_get_relative_transformation_matrix (ClutterActor      *self,
+-                                                   ClutterActor      *ancestor,
+-                                                   graphene_matrix_t *matrix)
++void
++clutter_actor_get_relative_transformation_matrix (ClutterActor      *self,
++                                                  ClutterActor      *ancestor,
++                                                  graphene_matrix_t *matrix)
+ {
+   graphene_matrix_init_identity (matrix);
+ 
+@@ -3705,8 +3701,8 @@ clutter_actor_paint (ClutterActor        *self,
+         {
+           graphene_matrix_t expected_matrix;
+ 
+-          _clutter_actor_get_relative_transformation_matrix (self, NULL,
+-                                                             &expected_matrix);
++          clutter_actor_get_relative_transformation_matrix (self, NULL,
++                                                            &expected_matrix);
+ 
+           if (!graphene_matrix_equal_fast (&transform, &expected_matrix))
+             {
+diff --git a/clutter/clutter/clutter-mutter.h b/clutter/clutter/clutter-mutter.h
+index eb1ce19e5c8..9fec1c008d3 100644
+--- a/clutter/clutter/clutter-mutter.h
++++ b/clutter/clutter/clutter-mutter.h
+@@ -135,6 +135,11 @@ void clutter_get_debug_flags (ClutterDebugFlag     *debug_flags,
+ CLUTTER_EXPORT
+ void clutter_actor_notify_transform_invalid (ClutterActor *self);
+ 
++CLUTTER_EXPORT
++void clutter_actor_get_relative_transformation_matrix (ClutterActor      *self,
++                                                       ClutterActor      *ancestor,
++                                                       graphene_matrix_t *matrix);
++
+ #undef __CLUTTER_H_INSIDE__
+ 
+ #endif /* __CLUTTER_MUTTER_H__ */
+-- 
+GitLab
+
+
+From 621fa0a6378901cd9732c96f8ec03fbb691e9fe7 Mon Sep 17 00:00:00 2001
+From: msizanoen1 <msizanoen@qtmlabs.xyz>
+Date: Fri, 7 Apr 2023 22:19:34 +0700
+Subject: [PATCH 08/23] cullable: Generalize actor coordinates space
+ translation for regions
+
+This allows MetaCullable to work with actors using arbitrary transforms
+which will be needed for implementing surface pixel alignment for
+fractional-scale-v1.
+
+This also deletes meta_cullable_is_untransformed as it's no longer
+necessary, and we can also stop manually scaling the region objects
+while performing opaque region culling in surfaces since it's now
+handled transparently by the new `meta_cullable_cull_out_children`
+implementation.
+
+Part-of: <https://gitlab.gnome.org/GNOME/mutter/-/merge_requests/2726>
+
+(cherry picked from commit 8b3c1f4b876e254d64bea6607ab668653aa705a0)
+---
+ src/compositor/meta-cullable.c             | 99 +++++++++++++---------
+ src/compositor/meta-cullable.h             |  8 +-
+ src/compositor/meta-surface-actor.c        | 84 ++----------------
+ src/compositor/meta-window-actor-wayland.c | 24 ------
+ src/compositor/meta-window-group.c         | 72 ++++++++--------
+ src/compositor/region-utils.c              | 33 ++++++++
+ src/compositor/region-utils.h              |  4 +
+ 7 files changed, 147 insertions(+), 177 deletions(-)
+
+diff --git a/src/compositor/meta-cullable.c b/src/compositor/meta-cullable.c
+index e306c56e287..8b60e36de5d 100644
+--- a/src/compositor/meta-cullable.c
++++ b/src/compositor/meta-cullable.c
+@@ -23,8 +23,10 @@
+ 
+ #include "config.h"
+ 
++#include "clutter/clutter-mutter.h"
+ #include "compositor/clutter-utils.h"
+ #include "compositor/meta-cullable.h"
++#include "compositor/region-utils.h"
+ 
+ G_DEFINE_INTERFACE (MetaCullable, meta_cullable, CLUTTER_TYPE_ACTOR);
+ 
+@@ -44,6 +46,16 @@ has_active_effects (ClutterActor *actor)
+   return FALSE;
+ }
+ 
++static cairo_region_t *
++region_apply_transform_expand_maybe_ref (cairo_region_t    *region,
++                                         graphene_matrix_t *transform)
++{
++  if (cairo_region_is_empty (region))
++    return cairo_region_reference (region);
++
++  return meta_region_apply_matrix_transform_expand (region, transform);
++}
++
+ /**
+  * SECTION:meta-cullable
+  * @title: MetaCullable
+@@ -86,7 +98,6 @@ meta_cullable_cull_out_children (MetaCullable   *cullable,
+   clutter_actor_iter_init (&iter, actor);
+   while (clutter_actor_iter_prev (&iter, &child))
+     {
+-      float x, y;
+       gboolean needs_culling;
+ 
+       if (!META_IS_CULLABLE (child))
+@@ -116,21 +127,60 @@ meta_cullable_cull_out_children (MetaCullable   *cullable,
+       if (needs_culling && has_active_effects (child))
+         needs_culling = FALSE;
+ 
+-      if (needs_culling && !meta_cullable_is_untransformed (META_CULLABLE (child)))
+-        needs_culling = FALSE;
+-
+       if (needs_culling)
+         {
+-          clutter_actor_get_position (child, &x, &y);
++          cairo_region_t *actor_unobscured_region, *actor_clip_region;
++          cairo_region_t *reduced_unobscured_region, *reduced_clip_region;
++          graphene_matrix_t actor_transform, inverted_actor_transform;
++
++          clutter_actor_get_transform (child, &actor_transform);
++
++          if (graphene_matrix_is_identity (&actor_transform))
++            {
++              /* No transformation needed, simply pass through to child */
++              meta_cullable_cull_out (META_CULLABLE (child),
++                                      unobscured_region,
++                                      clip_region);
++              continue;
++            }
++
++          if (!graphene_matrix_inverse (&actor_transform,
++                                        &inverted_actor_transform) ||
++              !graphene_matrix_is_2d (&actor_transform))
++            {
++              meta_cullable_cull_out (META_CULLABLE (child), NULL, NULL);
++              continue;
++            }
++
++          actor_unobscured_region =
++            region_apply_transform_expand_maybe_ref (unobscured_region,
++                                                     &inverted_actor_transform);
++          actor_clip_region =
++            region_apply_transform_expand_maybe_ref (clip_region,
++                                                     &inverted_actor_transform);
++
++          g_assert (actor_unobscured_region && actor_clip_region);
++
++          meta_cullable_cull_out (META_CULLABLE (child),
++                                  actor_unobscured_region,
++                                  actor_clip_region);
++
++          reduced_unobscured_region =
++            region_apply_transform_expand_maybe_ref (actor_unobscured_region,
++                                                     &actor_transform);
++          reduced_clip_region =
++            region_apply_transform_expand_maybe_ref (actor_clip_region,
++                                                     &actor_transform);
+ 
+-          /* Temporarily move to the coordinate system of the actor */
+-          cairo_region_translate (unobscured_region, - x, - y);
+-          cairo_region_translate (clip_region, - x, - y);
++          g_assert (reduced_unobscured_region && reduced_clip_region);
+ 
+-          meta_cullable_cull_out (META_CULLABLE (child), unobscured_region, clip_region);
++          cairo_region_intersect (unobscured_region, reduced_unobscured_region);
++          cairo_region_intersect (clip_region, reduced_clip_region);
+ 
+-          cairo_region_translate (unobscured_region, x, y);
+-          cairo_region_translate (clip_region, x, y);
++          cairo_region_destroy (actor_unobscured_region);
++          cairo_region_destroy (actor_clip_region);
++          cairo_region_destroy (reduced_unobscured_region);
++          cairo_region_destroy (reduced_clip_region);
+         }
+       else
+         {
+@@ -165,23 +215,9 @@ meta_cullable_reset_culling_children (MetaCullable *cullable)
+     }
+ }
+ 
+-static gboolean
+-meta_cullable_default_is_untransformed (MetaCullable *cullable)
+-{
+-  float width, height;
+-  graphene_point3d_t verts[4];
+-
+-  clutter_actor_get_size (CLUTTER_ACTOR (cullable), &width, &height);
+-  clutter_actor_get_abs_allocation_vertices (CLUTTER_ACTOR (cullable), verts);
+-
+-  return meta_actor_vertices_are_untransformed (verts, width, height,
+-                                                NULL);
+-}
+-
+ static void
+ meta_cullable_default_init (MetaCullableInterface *iface)
+ {
+-  iface->is_untransformed = meta_cullable_default_is_untransformed;
+ }
+ 
+ /**
+@@ -216,19 +252,6 @@ meta_cullable_cull_out (MetaCullable   *cullable,
+   META_CULLABLE_GET_IFACE (cullable)->cull_out (cullable, unobscured_region, clip_region);
+ }
+ 
+-/**
+- * meta_cullable_is_untransformed:
+- * @cullable: The #MetaCullable
+- *
+- * Check if a cullable is "untransformed" - which actually means transformed by
+- * at most a integer-translation.
+- */
+-gboolean
+-meta_cullable_is_untransformed (MetaCullable *cullable)
+-{
+-  return META_CULLABLE_GET_IFACE (cullable)->is_untransformed (cullable);
+-}
+-
+ /**
+  * meta_cullable_reset_culling:
+  * @cullable: The #MetaCullable
+diff --git a/src/compositor/meta-cullable.h b/src/compositor/meta-cullable.h
+index 471681da3db..4087bc44e26 100644
+--- a/src/compositor/meta-cullable.h
++++ b/src/compositor/meta-cullable.h
+@@ -36,17 +36,15 @@ struct _MetaCullableInterface
+ {
+   GTypeInterface g_iface;
+ 
+-  void (* cull_out)      (MetaCullable   *cullable,
+-                          cairo_region_t *unobscured_region,
+-                          cairo_region_t *clip_region);
+-  gboolean (* is_untransformed) (MetaCullable *cullable);
++  void (* cull_out) (MetaCullable   *cullable,
++                     cairo_region_t *unobscured_region,
++                     cairo_region_t *clip_region);
+   void (* reset_culling) (MetaCullable  *cullable);
+ };
+ 
+ void meta_cullable_cull_out (MetaCullable   *cullable,
+                              cairo_region_t *unobscured_region,
+                              cairo_region_t *clip_region);
+-gboolean meta_cullable_is_untransformed (MetaCullable *cullable);
+ void meta_cullable_reset_culling (MetaCullable *cullable);
+ 
+ /* Utility methods for implementations */
+diff --git a/src/compositor/meta-surface-actor.c b/src/compositor/meta-surface-actor.c
+index fcd94b86d3a..9a27d1a7e59 100644
+--- a/src/compositor/meta-surface-actor.c
++++ b/src/compositor/meta-surface-actor.c
+@@ -77,43 +77,6 @@ effective_unobscured_region (MetaSurfaceActor *surface_actor)
+   return priv->unobscured_region;
+ }
+ 
+-static cairo_region_t*
+-get_scaled_region (MetaSurfaceActor     *surface_actor,
+-                   cairo_region_t       *region,
+-                   ScalePerspectiveType  scale_perspective)
+-{
+-  MetaWindowActor *window_actor;
+-  cairo_region_t *scaled_region = NULL;
+-  int geometry_scale;
+-  float x, y;
+-
+-  window_actor = meta_window_actor_from_actor (CLUTTER_ACTOR (surface_actor));
+-  geometry_scale = meta_window_actor_get_geometry_scale (window_actor);
+-
+-  clutter_actor_get_position (CLUTTER_ACTOR (surface_actor), &x, &y);
+-  cairo_region_translate (region, x, y);
+-
+-  switch (scale_perspective)
+-    {
+-    case IN_STAGE_PERSPECTIVE:
+-      scaled_region = meta_region_scale_double (region,
+-                                                geometry_scale,
+-                                                META_ROUNDING_STRATEGY_GROW);
+-      break;
+-    case IN_ACTOR_PERSPECTIVE:
+-      scaled_region = meta_region_scale_double (region,
+-                                                1.0 / geometry_scale,
+-                                                META_ROUNDING_STRATEGY_GROW);
+-      break;
+-    }
+-
+-  g_assert (scaled_region != NULL);
+-  cairo_region_translate (region, -x, -y);
+-  cairo_region_translate (scaled_region, -x, -y);
+-
+-  return scaled_region;
+-}
+-
+ static void
+ set_unobscured_region (MetaSurfaceActor *surface_actor,
+                        cairo_region_t   *unobscured_region)
+@@ -141,9 +104,7 @@ set_unobscured_region (MetaSurfaceActor *surface_actor,
+             .height = height,
+           };
+ 
+-          priv->unobscured_region = get_scaled_region (surface_actor,
+-                                                       unobscured_region,
+-                                                       IN_ACTOR_PERSPECTIVE);
++          priv->unobscured_region = cairo_region_copy (unobscured_region);
+ 
+           cairo_region_intersect_rectangle (priv->unobscured_region, &bounds);
+         }
+@@ -160,14 +121,12 @@ set_clip_region (MetaSurfaceActor *surface_actor,
+ 
+   if (clip_region && !cairo_region_is_empty (clip_region))
+     {
+-      cairo_region_t *region;
++      cairo_region_t *clip_region_copy;
+ 
+-      region = get_scaled_region (surface_actor,
+-                                  clip_region,
+-                                  IN_ACTOR_PERSPECTIVE);
+-      meta_shaped_texture_set_clip_region (stex, region);
++      clip_region_copy = cairo_region_copy (clip_region);
++      meta_shaped_texture_set_clip_region (stex, clip_region_copy);
+ 
+-      cairo_region_destroy (region);
++      cairo_region_destroy (clip_region_copy);
+     }
+   else
+     {
+@@ -293,47 +252,19 @@ meta_surface_actor_cull_out (MetaCullable   *cullable,
+   if (opacity == 0xff)
+     {
+       cairo_region_t *opaque_region;
+-      cairo_region_t *scaled_opaque_region;
+ 
+       opaque_region = meta_shaped_texture_get_opaque_region (priv->texture);
+ 
+       if (!opaque_region)
+         return;
+ 
+-      scaled_opaque_region = get_scaled_region (surface_actor,
+-                                                opaque_region,
+-                                                IN_STAGE_PERSPECTIVE);
+-
+       if (unobscured_region)
+-        cairo_region_subtract (unobscured_region, scaled_opaque_region);
++        cairo_region_subtract (unobscured_region, opaque_region);
+       if (clip_region)
+-        cairo_region_subtract (clip_region, scaled_opaque_region);
+-
+-      cairo_region_destroy (scaled_opaque_region);
++        cairo_region_subtract (clip_region, opaque_region);
+     }
+ }
+ 
+-static gboolean
+-meta_surface_actor_is_untransformed (MetaCullable *cullable)
+-{
+-  ClutterActor *actor = CLUTTER_ACTOR (cullable);
+-  MetaWindowActor *window_actor;
+-  float width, height;
+-  graphene_point3d_t verts[4];
+-  int geometry_scale;
+-
+-  clutter_actor_get_size (actor, &width, &height);
+-  clutter_actor_get_abs_allocation_vertices (actor, verts);
+-
+-  window_actor = meta_window_actor_from_actor (actor);
+-  geometry_scale = meta_window_actor_get_geometry_scale (window_actor);
+-
+-  return meta_actor_vertices_are_untransformed (verts,
+-                                                width * geometry_scale,
+-                                                height * geometry_scale,
+-                                                NULL);
+-}
+-
+ static void
+ meta_surface_actor_reset_culling (MetaCullable *cullable)
+ {
+@@ -346,7 +277,6 @@ static void
+ cullable_iface_init (MetaCullableInterface *iface)
+ {
+   iface->cull_out = meta_surface_actor_cull_out;
+-  iface->is_untransformed = meta_surface_actor_is_untransformed;
+   iface->reset_culling = meta_surface_actor_reset_culling;
+ }
+ 
+diff --git a/src/compositor/meta-window-actor-wayland.c b/src/compositor/meta-window-actor-wayland.c
+index a74a19aba12..b465a793bc4 100644
+--- a/src/compositor/meta-window-actor-wayland.c
++++ b/src/compositor/meta-window-actor-wayland.c
+@@ -87,29 +87,6 @@ surface_container_cull_out (MetaCullable   *cullable,
+   meta_cullable_cull_out_children (cullable, unobscured_region, clip_region);
+ }
+ 
+-static gboolean
+-surface_container_is_untransformed (MetaCullable *cullable)
+-{
+-  MetaSurfaceContainerActorWayland *surface_container =
+-    META_SURFACE_CONTAINER_ACTOR_WAYLAND (cullable);
+-  ClutterActor *actor = CLUTTER_ACTOR (cullable);
+-  MetaWindowActor *window_actor;
+-  float width, height;
+-  graphene_point3d_t verts[4];
+-  int geometry_scale;
+-
+-  clutter_actor_get_size (actor, &width, &height);
+-  clutter_actor_get_abs_allocation_vertices (actor, verts);
+-
+-  window_actor = surface_container->window_actor;
+-  geometry_scale = meta_window_actor_get_geometry_scale (window_actor);
+-
+-  return meta_actor_vertices_are_untransformed (verts,
+-                                                width * geometry_scale,
+-                                                height * geometry_scale,
+-                                                NULL);
+-}
+-
+ static void
+ surface_container_reset_culling (MetaCullable *cullable)
+ {
+@@ -120,7 +97,6 @@ static void
+ surface_container_cullable_iface_init (MetaCullableInterface *iface)
+ {
+   iface->cull_out = surface_container_cull_out;
+-  iface->is_untransformed = surface_container_is_untransformed;
+   iface->reset_culling = surface_container_reset_culling;
+ }
+ 
+diff --git a/src/compositor/meta-window-group.c b/src/compositor/meta-window-group.c
+index f5d8b9a627b..2889bbc1085 100644
+--- a/src/compositor/meta-window-group.c
++++ b/src/compositor/meta-window-group.c
+@@ -9,6 +9,7 @@
+ #include "compositor/meta-cullable.h"
+ #include "compositor/meta-window-actor-private.h"
+ #include "compositor/meta-window-group-private.h"
++#include "compositor/region-utils.h"
+ #include "core/display-private.h"
+ #include "core/window-private.h"
+ 
+@@ -62,62 +63,63 @@ meta_window_group_paint (ClutterActor        *actor,
+   cairo_region_t *clip_region;
+   cairo_region_t *unobscured_region;
+   cairo_rectangle_int_t visible_rect;
+-  int paint_x_origin, paint_y_origin;
+   int screen_width, screen_height;
++  graphene_matrix_t stage_to_actor;
+ 
+   redraw_clip = clutter_paint_context_get_redraw_clip (paint_context);
+   if (!redraw_clip)
+-    {
+-      parent_actor_class->paint (actor, paint_context);
+-      return;
+-    }
++    goto fail;
+ 
+   meta_display_get_size (window_group->display, &screen_width, &screen_height);
+ 
+   /* Normally we expect an actor to be drawn at it's position on the screen.
+    * However, if we're inside the paint of a ClutterClone, that won't be the
+-   * case and we need to compensate. We look at the position of the window
+-   * group under the current model-view matrix and the position of the actor.
+-   * If they are both simply integer translations, then we can compensate
+-   * easily, otherwise we give up.
+-   *
+-   * Possible cleanup: work entirely in paint space - we can compute the
+-   * combination of the model-view matrix with the local matrix for each child
+-   * actor and get a total transformation for that actor for how we are
+-   * painting currently, and never worry about how actors are positioned
+-   * on the stage.
++   * case and we need to compensate.
+    */
+   if (clutter_actor_is_in_clone_paint (actor))
+     {
+       CoglFramebuffer *fb;
+       ClutterStageView *view;
+-      MetaTransforms trans;
++      graphene_matrix_t eye_to_actor, actor_to_eye, stage_to_eye;
+ 
+       fb = clutter_paint_context_get_framebuffer (paint_context);
+       view = clutter_paint_context_get_stage_view (paint_context);
++
+       if (!view ||
+-          fb != clutter_stage_view_get_framebuffer (view) ||
+-          !meta_actor_painting_untransformed (fb,
+-                                              screen_width,
+-                                              screen_height,
+-                                              screen_width,
+-                                              screen_height,
+-                                              &trans) ||
+-          !meta_cullable_is_untransformed (META_CULLABLE (actor)))
++          fb != clutter_stage_view_get_framebuffer (view))
+         {
+-          parent_actor_class->paint (actor, paint_context);
+-          return;
++          goto fail;
+         }
+ 
+-      paint_x_origin = trans.x_origin;
+-      paint_y_origin = trans.y_origin;
++      cogl_framebuffer_get_modelview_matrix (fb, &actor_to_eye);
++
++      /* We need to obtain the transformation matrix from eye coordinates
++       * to cloned actor coordinates to be able to deduce the transformation
++       * matrix from stage to cloned actor coordinates, which is needed to
++       * calculate the redraw clip for the current actor.
++       * If we cannot do this because the cloned actor modelview matrix is
++       * non-invertible, give up on culling.
++       */
++      if (!graphene_matrix_inverse (&actor_to_eye, &eye_to_actor))
++        goto fail;
++
++      clutter_actor_get_transform (stage, &stage_to_eye);
++      graphene_matrix_multiply (&stage_to_eye, &eye_to_actor,
++                                &stage_to_actor);
+     }
+   else
+     {
+-      paint_x_origin = 0;
+-      paint_y_origin = 0;
++      graphene_matrix_t actor_to_stage;
++
++      clutter_actor_get_relative_transformation_matrix (actor, stage,
++                                                        &actor_to_stage);
++      if (!graphene_matrix_inverse (&actor_to_stage, &stage_to_actor))
++        goto fail;
+     }
+ 
++  if (!graphene_matrix_is_2d (&stage_to_actor))
++    goto fail;
++
+   visible_rect.x = visible_rect.y = 0;
+   visible_rect.width = clutter_actor_get_width (CLUTTER_ACTOR (stage));
+   visible_rect.height = clutter_actor_get_height (CLUTTER_ACTOR (stage));
+@@ -129,9 +131,8 @@ meta_window_group_paint (ClutterActor        *actor,
+    * multihead setup with mismatched monitor sizes, we could intersect this
+    * with an accurate union of the monitors to avoid painting shadows that are
+    * visible only in the holes. */
+-  clip_region = cairo_region_copy (redraw_clip);
+-
+-  cairo_region_translate (clip_region, -paint_x_origin, -paint_y_origin);
++  clip_region = meta_region_apply_matrix_transform_expand (redraw_clip,
++                                                           &stage_to_actor);
+ 
+   meta_cullable_cull_out (META_CULLABLE (window_group), unobscured_region, clip_region);
+ 
+@@ -141,6 +142,11 @@ meta_window_group_paint (ClutterActor        *actor,
+   parent_actor_class->paint (actor, paint_context);
+ 
+   meta_cullable_reset_culling (META_CULLABLE (window_group));
++
++  return;
++
++fail:
++  parent_actor_class->paint (actor, paint_context);
+ }
+ 
+ /* Adapted from clutter_actor_update_default_paint_volume() */
+diff --git a/src/compositor/region-utils.c b/src/compositor/region-utils.c
+index e00f123d339..892d59fc118 100644
+--- a/src/compositor/region-utils.c
++++ b/src/compositor/region-utils.c
+@@ -472,3 +472,36 @@ meta_region_to_cairo_path (cairo_region_t *region,
+       cairo_rectangle (cr, rect.x, rect.y, rect.width, rect.height);
+     }
+ }
++
++cairo_region_t *
++meta_region_apply_matrix_transform_expand (const cairo_region_t *region,
++                                           graphene_matrix_t    *transform)
++{
++  int n_rects, i;
++  cairo_rectangle_int_t *rects;
++  cairo_region_t *transformed_region;
++
++  if (graphene_matrix_is_identity (transform))
++    return cairo_region_copy (region);
++
++  n_rects = cairo_region_num_rectangles (region);
++  META_REGION_CREATE_RECTANGLE_ARRAY_SCOPED (n_rects, rects);
++  for (i = 0; i < n_rects; i++)
++    {
++      graphene_rect_t transformed_rect, rect;
++      cairo_rectangle_int_t int_rect;
++
++      cairo_region_get_rectangle (region, i, &int_rect);
++      rect = meta_rectangle_to_graphene_rect (&int_rect);
++
++      graphene_matrix_transform_bounds (transform, &rect, &transformed_rect);
++
++      meta_rectangle_from_graphene_rect (&transformed_rect,
++                                         META_ROUNDING_STRATEGY_GROW,
++                                         &rects[i]);
++    }
++
++  transformed_region = cairo_region_create_rectangles (rects, n_rects);
++
++  return transformed_region;
++}
+diff --git a/src/compositor/region-utils.h b/src/compositor/region-utils.h
+index a3b89f99483..cf73151929a 100644
+--- a/src/compositor/region-utils.h
++++ b/src/compositor/region-utils.h
+@@ -119,4 +119,8 @@ cairo_region_t * meta_region_crop_and_scale (cairo_region_t  *region,
+ void meta_region_to_cairo_path (cairo_region_t *region,
+                                 cairo_t        *cr);
+ 
++cairo_region_t *
++meta_region_apply_matrix_transform_expand (const cairo_region_t *region,
++                                           graphene_matrix_t    *transform);
++
+ #endif /* __META_REGION_UTILS_H__ */
+-- 
+GitLab
+
+
+From 89b3eff80f6970c18068f63b4ded34c4a491b494 Mon Sep 17 00:00:00 2001
+From: msizanoen1 <msizanoen@qtmlabs.xyz>
+Date: Sat, 8 Apr 2023 14:24:20 +0700
+Subject: [PATCH 09/23] surface-actor: Use clutter_actor_get_paint_opacity
+
+This prevents opaque regions from being subtracted from the unobscured
+regions while MetaWindowActor is transparent (e.g. in window close
+animation).
+
+Part-of: <https://gitlab.gnome.org/GNOME/mutter/-/merge_requests/2726>
+
+(cherry picked from commit caca38106f85709c200ff7767979c6f6c0a3c68b)
+---
+ src/compositor/meta-surface-actor.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/compositor/meta-surface-actor.c b/src/compositor/meta-surface-actor.c
+index 9a27d1a7e59..ab2893d2350 100644
+--- a/src/compositor/meta-surface-actor.c
++++ b/src/compositor/meta-surface-actor.c
+@@ -244,7 +244,7 @@ meta_surface_actor_cull_out (MetaCullable   *cullable,
+   MetaSurfaceActor *surface_actor = META_SURFACE_ACTOR (cullable);
+   MetaSurfaceActorPrivate *priv =
+     meta_surface_actor_get_instance_private (surface_actor);
+-  uint8_t opacity = clutter_actor_get_opacity (CLUTTER_ACTOR (cullable));
++  uint8_t opacity = clutter_actor_get_paint_opacity (CLUTTER_ACTOR (cullable));
+ 
+   set_unobscured_region (surface_actor, unobscured_region);
+   set_clip_region (surface_actor, clip_region);
+-- 
+GitLab
+
+
+From 4046b1856e4e4ed86aa381949b84d4f85e9bdb28 Mon Sep 17 00:00:00 2001
+From: msizanoen1 <msizanoen@qtmlabs.xyz>
+Date: Sat, 8 Apr 2023 14:51:21 +0700
+Subject: [PATCH 10/23] window-actor/wayland: Check opacity before subtracting
+ background in cull
+
+This ensures that the background regions don't get marked as obscured if
+the window itself is transparent (e.g. in window animation).
+
+Part-of: <https://gitlab.gnome.org/GNOME/mutter/-/merge_requests/2726>
+
+(cherry picked from commit 231729b7f2bfc79ab19bff13ecbfa69547956bc0)
+---
+ src/compositor/meta-window-actor-wayland.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/src/compositor/meta-window-actor-wayland.c b/src/compositor/meta-window-actor-wayland.c
+index b465a793bc4..3c62e6a26e0 100644
+--- a/src/compositor/meta-window-actor-wayland.c
++++ b/src/compositor/meta-window-actor-wayland.c
+@@ -296,7 +296,8 @@ meta_window_actor_wayland_cull_out (MetaCullable   *cullable,
+   meta_cullable_cull_out_children (META_CULLABLE (self),
+                                    unobscured_region,
+                                    clip_region);
+-  if (self->background)
++  if (self->background &&
++      clutter_actor_get_paint_opacity (CLUTTER_ACTOR (self)) == 0xff)
+     {
+       cairo_region_t *background_cull_region;
+ 
+-- 
+GitLab
+
+
+From a6d03d7e213cab965a3dd721a6721635479d85eb Mon Sep 17 00:00:00 2001
+From: msizanoen1 <msizanoen@qtmlabs.xyz>
+Date: Wed, 19 Apr 2023 18:43:50 +0700
+Subject: [PATCH 11/23] surface-actor: Fix
+ meta_surface_actor_is_obscured_on_stage_view
+
+`meta_surface_actor_is_obscured_on_stage_view` currently fails to
+account for non-identity scaling of actor size (e.g. window actor
+geometry scale or surface pixel alignment).
+
+Fix this by using the new `meta_region_apply_matrix_transform_expand` to
+calculate the unobscured region in stage coordinates.
+
+Part-of: <https://gitlab.gnome.org/GNOME/mutter/-/merge_requests/2726>
+
+(cherry picked from commit ae4755cc614857e6203748c2b674a818df6cb9a9)
+---
+ src/compositor/meta-surface-actor.c | 17 ++++++++++++-----
+ 1 file changed, 12 insertions(+), 5 deletions(-)
+
+diff --git a/src/compositor/meta-surface-actor.c b/src/compositor/meta-surface-actor.c
+index ab2893d2350..e148d8875d6 100644
+--- a/src/compositor/meta-surface-actor.c
++++ b/src/compositor/meta-surface-actor.c
+@@ -388,9 +388,11 @@ meta_surface_actor_is_obscured_on_stage_view (MetaSurfaceActor *self,
+     {
+       MetaSurfaceActorPrivate *priv =
+         meta_surface_actor_get_instance_private (self);
++      ClutterActor *stage = clutter_actor_get_stage (CLUTTER_ACTOR (self));
+       cairo_region_t *intersection_region;
+       cairo_rectangle_int_t stage_rect;
+-      float x, y;
++      graphene_matrix_t transform;
++      graphene_rect_t actor_bounds;
+       float bounds_width, bounds_height;
+       float bounds_size;
+       int intersection_size = 0;
+@@ -399,9 +401,11 @@ meta_surface_actor_is_obscured_on_stage_view (MetaSurfaceActor *self,
+       if (cairo_region_is_empty (unobscured_region))
+         return TRUE;
+ 
+-      intersection_region = cairo_region_copy (unobscured_region);
+-      clutter_actor_get_transformed_position (CLUTTER_ACTOR (self), &x, &y);
+-      cairo_region_translate (intersection_region, x, y);
++      clutter_actor_get_relative_transformation_matrix (CLUTTER_ACTOR (self),
++                                                        stage,
++                                                        &transform);
++
++      intersection_region = meta_region_apply_matrix_transform_expand (unobscured_region, &transform);
+ 
+       clutter_stage_view_get_layout (stage_view, &stage_rect);
+       cairo_region_intersect_rectangle (intersection_region,
+@@ -421,7 +425,10 @@ meta_surface_actor_is_obscured_on_stage_view (MetaSurfaceActor *self,
+       clutter_content_get_preferred_size (CLUTTER_CONTENT (priv->texture),
+                                           &bounds_width,
+                                           &bounds_height);
+-      bounds_size = bounds_width * bounds_height;
++      graphene_rect_init (&actor_bounds, 0, 0, bounds_width, bounds_height);
++      graphene_matrix_transform_bounds (&transform, &actor_bounds, &actor_bounds);
++      graphene_rect_round_extents (&actor_bounds, &actor_bounds);
++      bounds_size = graphene_rect_get_area (&actor_bounds);
+ 
+       n_rects = cairo_region_num_rectangles (intersection_region);
+       for (i = 0; i < n_rects; i++)
+-- 
+GitLab
+
+
+From f2c04df8e8ec6159a2fd77cb7897a7c7f6bae669 Mon Sep 17 00:00:00 2001
+From: msizanoen1 <msizanoen@qtmlabs.xyz>
+Date: Mon, 17 Apr 2023 17:51:58 +0700
+Subject: [PATCH 12/23] stage: Keep queued actor redraw clip volumes separate
+
+This aims to reduce the amount of pixels that have to be redrawed on the
+screen on a clipped actor redraw in case using the union of two
+different clips in a surface will substantially increase the redrawn
+area.
+
+This should not result in excessive memory consumption as callers of
+`clutter_actor_queue_redraw_with_clip` are expected to ensure that the
+redraw clip rectangles are adequately deduplicated.
+
+Part-of: <https://gitlab.gnome.org/GNOME/mutter/-/merge_requests/2965>
+
+(cherry picked from commit 4048562961c461c33ab7dfcb1bdd9066004a9a11)
+---
+ clutter/clutter/clutter-stage.c | 67 ++++++++++++++-------------------
+ 1 file changed, 28 insertions(+), 39 deletions(-)
+
+diff --git a/clutter/clutter/clutter-stage.c b/clutter/clutter/clutter-stage.c
+index 14774f6f0b0..4afb5b7054b 100644
+--- a/clutter/clutter/clutter-stage.c
++++ b/clutter/clutter/clutter-stage.c
+@@ -77,8 +77,7 @@
+ 
+ typedef struct _QueueRedrawEntry
+ {
+-  gboolean has_clip;
+-  ClutterPaintVolume clip;
++  GSList *clips;
+ } QueueRedrawEntry;
+ 
+ typedef struct _PickRecord
+@@ -2542,52 +2541,39 @@ clutter_stage_queue_actor_redraw (ClutterStage             *stage,
+ 
+   entry = g_hash_table_lookup (priv->pending_queue_redraws, actor);
+ 
+-  if (entry)
++  if (!entry)
+     {
+-      /* Ignore all requests to queue a redraw for an actor if a full
+-       * (non-clipped) redraw of the actor has already been queued. */
+-      if (!entry->has_clip)
+-        {
+-          CLUTTER_NOTE (CLIPPING, "Bail from stage_queue_actor_redraw (%s): "
+-                        "Unclipped redraw of actor already queued",
+-                        _clutter_actor_get_debug_name (actor));
+-          return;
+-        }
+-
+-      /* If queuing a clipped redraw and a clipped redraw has
+-       * previously been queued for this actor then combine the latest
+-       * clip together with the existing clip */
+-      if (clip)
+-        clutter_paint_volume_union (&entry->clip, clip);
+-      else
+-        {
+-          clutter_paint_volume_free (&entry->clip);
+-          entry->has_clip = FALSE;
+-        }
++      entry = g_new0 (QueueRedrawEntry, 1);
++      g_hash_table_insert (priv->pending_queue_redraws,
++                           g_object_ref (actor), entry);
+     }
+-  else
++  else if (!entry->clips)
+     {
+-      entry = g_new0 (QueueRedrawEntry, 1);
++      CLUTTER_NOTE (CLIPPING, "Bail from stage_queue_actor_redraw (%s): "
++                    "Unclipped redraw of actor already queued",
++                    _clutter_actor_get_debug_name (actor));
++      return;
++    }
+ 
+-      if (clip)
+-        {
+-          entry->has_clip = TRUE;
+-          _clutter_paint_volume_init_static (&entry->clip, actor);
+-          _clutter_paint_volume_set_from_volume (&entry->clip, clip);
+-        }
+-      else
+-        entry->has_clip = FALSE;
++  /* If queuing a clipped redraw then append the latest
++   * clip to the clip list */
++  if (clip)
++    {
++      ClutterPaintVolume *clip_pv = _clutter_paint_volume_new (actor);
+ 
+-      g_hash_table_insert (priv->pending_queue_redraws,
+-                           g_object_ref (actor), entry);
++      _clutter_paint_volume_set_from_volume (clip_pv, clip);
++      entry->clips = g_slist_prepend (entry->clips, clip_pv);
++    }
++  else
++    {
++      g_clear_slist (&entry->clips, (GDestroyNotify) clutter_paint_volume_free);
+     }
+ }
+ 
+ static void
+ free_queue_redraw_entry (QueueRedrawEntry *entry)
+ {
+-  if (entry->has_clip)
+-    clutter_paint_volume_free (&entry->clip);
++  g_clear_slist (&entry->clips, (GDestroyNotify) clutter_paint_volume_free);
+   g_free (entry);
+ }
+ 
+@@ -2682,9 +2668,12 @@ clutter_stage_maybe_finish_queue_redraws (ClutterStage *stage)
+           _clutter_paint_volume_init_static (&old_actor_pv, NULL);
+           _clutter_paint_volume_init_static (&new_actor_pv, NULL);
+ 
+-          if (entry->has_clip)
++          if (entry->clips)
+             {
+-              add_to_stage_clip (stage, &entry->clip);
++              GSList *l;
++
++              for (l = entry->clips; l; l = l->next)
++                add_to_stage_clip (stage, l->data);
+             }
+           else if (clutter_actor_get_redraw_clip (redraw_actor,
+                                                   &old_actor_pv,
+-- 
+GitLab
+
+
+From 0e3a2da646d6ee03029e9a88970a5e5650d17ac8 Mon Sep 17 00:00:00 2001
+From: msizanoen1 <msizanoen@qtmlabs.xyz>
+Date: Mon, 17 Apr 2023 18:27:18 +0700
+Subject: [PATCH 13/23] surface-actor: Queue rectangles of update region
+ separately
+
+This aims to help reduce the amount of pixels redrawn on the screen in
+case the damage rectangle is partially occluded by another surface.
+
+Part-of: <https://gitlab.gnome.org/GNOME/mutter/-/merge_requests/2965>
+
+(cherry	picked from commit 3f85158b85f66e003c5fecd3314bb178799f9b0c)
+---
+ src/compositor/meta-surface-actor.c | 13 ++++++++++---
+ 1 file changed, 10 insertions(+), 3 deletions(-)
+
+diff --git a/src/compositor/meta-surface-actor.c b/src/compositor/meta-surface-actor.c
+index e148d8875d6..21dbaff407d 100644
+--- a/src/compositor/meta-surface-actor.c
++++ b/src/compositor/meta-surface-actor.c
+@@ -342,10 +342,17 @@ meta_surface_actor_update_area (MetaSurfaceActor *self,
+ 
+           if (!cairo_region_is_empty (intersection))
+             {
+-              cairo_rectangle_int_t damage_rect;
++              int i, n_rectangles;
++
++              n_rectangles = cairo_region_num_rectangles (intersection);
++              for (i = 0; i < n_rectangles; i++)
++                {
++                  cairo_rectangle_int_t rect;
++
++                  cairo_region_get_rectangle (intersection, i, &rect);
++                  clutter_actor_queue_redraw_with_clip (CLUTTER_ACTOR (self), &rect);
++                }
+ 
+-              cairo_region_get_extents (intersection, &damage_rect);
+-              clutter_actor_queue_redraw_with_clip (CLUTTER_ACTOR (self), &damage_rect);
+               repaint_scheduled = TRUE;
+             }
+ 
+-- 
+GitLab
+
+
+From 4a27c9fcb7a41c10983b648a3e58e873b21e3ea3 Mon Sep 17 00:00:00 2001
+From: Robert Mader <robert.mader@collabora.com>
+Date: Mon, 22 May 2023 23:06:20 +0200
+Subject: [PATCH 14/23] clutter/actor-box: Avoid rounding compensation for
+ empty boxes
+
+Empty boxes should not be enlarged to non-empty boxes, otherwise we
+potentially confuse tests where we expect a zero-sized actor to also be on
+zero stage views.
+
+Part-of: <https://gitlab.gnome.org/GNOME/mutter/-/merge_requests/2679>
+
+(cherry picked from commit 64feb2e5f0d383bdc2c619bbda42fe51b21fa937)
+---
+ clutter/clutter/clutter-actor-box.c | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/clutter/clutter/clutter-actor-box.c b/clutter/clutter/clutter-actor-box.c
+index 2cbe691e6c8..e2fd87ce380 100644
+--- a/clutter/clutter/clutter-actor-box.c
++++ b/clutter/clutter/clutter-actor-box.c
+@@ -506,6 +506,9 @@ _clutter_actor_box_enlarge_for_effects (ClutterActorBox *box)
+ {
+   float width, height;
+ 
++  if (clutter_actor_box_get_area (box) == 0.0)
++    return;
++
+   /* The aim here is that for a given rectangle defined with floating point
+    * coordinates we want to determine a stable quantized size in pixels
+    * that doesn't vary due to the original box's sub-pixel position.
+-- 
+GitLab
+
+
+From d0787011fe244c6b22def290a1940a090c61d8de Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Jonas=20Dre=C3=9Fler?= <verdre@v0yd.nl>
+Date: Mon, 17 Oct 2022 17:11:07 +0200
+Subject: [PATCH 15/23] clutter/actor: Cache the visible paint volume
+
+If no actors have changed their positions and we're only repainting
+because a window needs a repaint, the paint volumes of all actors
+remain unchanged. There is no reason to redo those paint volumes on every
+stage update.
+
+So introduce caching and invalidation logic for the visible_paint_volume
+that allows us to avoid a ton of matrix multiplications that right now
+are happening for the whole mapped actor tree on every redraw.
+
+Note that this removes two places where the visible paint volume is set
+to an empty paint volume: This is a compromise so that we can keep
+around the cached pv when hiding and showing an actor, it does "regress"
+one case though: When hiding -> moving -> showing an actor, we'll now
+include the old paint volume of the actor in the redraw clip on show (even
+though redrawing that old region is not necessary, the actor was hidden
+after all). This results in a bit of overpaint in this very specific case,
+but for the sake of simplicity let's not care about that.
+
+Part-of: <https://gitlab.gnome.org/GNOME/mutter/-/merge_requests/2679>
+
+(cherry picked from commit 4cad96ed243c7d32be26da359d8c6a74b94d2ca1)
+---
+ clutter/clutter/clutter-actor.c | 36 ++++++++++++++++-----------------
+ 1 file changed, 17 insertions(+), 19 deletions(-)
+
+diff --git a/clutter/clutter/clutter-actor.c b/clutter/clutter/clutter-actor.c
+index e9034f87df1..c3bb36e1cb5 100644
+--- a/clutter/clutter/clutter-actor.c
++++ b/clutter/clutter/clutter-actor.c
+@@ -843,6 +843,7 @@ struct _ClutterActorPrivate
+   guint needs_x_expand              : 1;
+   guint needs_y_expand              : 1;
+   guint needs_paint_volume_update   : 1;
++  guint needs_visible_paint_volume_update : 1;
+   guint had_effects_on_last_paint_volume_update : 1;
+   guint needs_update_stage_views    : 1;
+   guint clear_stage_views_needs_stage_views_changed : 1;
+@@ -1506,6 +1507,7 @@ queue_update_paint_volume (ClutterActor *actor)
+   while (actor)
+     {
+       actor->priv->needs_paint_volume_update = TRUE;
++      actor->priv->needs_visible_paint_volume_update = TRUE;
+       actor = actor->priv->parent;
+     }
+ }
+@@ -1653,12 +1655,6 @@ clutter_actor_real_unmap (ClutterActor *self)
+ 
+   if (priv->unmapped_paint_branch_counter == 0)
+     {
+-      /* clear the contents of the visible paint volume, so that hiding + moving +
+-       * showing will not result in the wrong area being repainted
+-       */
+-      _clutter_paint_volume_init_static (&priv->visible_paint_volume, NULL);
+-      priv->visible_paint_volume_valid = TRUE;
+-
+       if (priv->parent && !CLUTTER_ACTOR_IN_DESTRUCTION (priv->parent))
+         {
+           if (G_UNLIKELY (priv->parent->flags & CLUTTER_ACTOR_NO_LAYOUT))
+@@ -2482,6 +2478,7 @@ static void
+ absolute_geometry_changed (ClutterActor *actor)
+ {
+   actor->priv->needs_update_stage_views = TRUE;
++  actor->priv->needs_visible_paint_volume_update = TRUE;
+ }
+ 
+ static ClutterActorTraverseVisitFlags
+@@ -7589,6 +7586,7 @@ clutter_actor_init (ClutterActor *self)
+   priv->needs_height_request = TRUE;
+   priv->needs_allocation = TRUE;
+   priv->needs_paint_volume_update = TRUE;
++  priv->needs_visible_paint_volume_update = TRUE;
+   priv->needs_update_stage_views = TRUE;
+ 
+   priv->cached_width_age = 1;
+@@ -7597,10 +7595,6 @@ clutter_actor_init (ClutterActor *self)
+   priv->opacity_override = -1;
+   priv->enable_model_view_transform = TRUE;
+ 
+-  /* We're not visible yet,  so the visible_paint_volume is empty */
+-  _clutter_paint_volume_init_static (&priv->visible_paint_volume, NULL);
+-  priv->visible_paint_volume_valid = TRUE;
+-
+   priv->transform_valid = FALSE;
+ 
+   /* the default is to stretch the content, to match the
+@@ -15497,17 +15491,21 @@ clutter_actor_finish_layout (ClutterActor *self,
+       CLUTTER_ACTOR_IN_DESTRUCTION (self))
+     return;
+ 
+-  ensure_paint_volume (self);
+-
+-  if (priv->has_paint_volume)
++  if (priv->needs_visible_paint_volume_update)
+     {
+-      _clutter_paint_volume_copy_static (&priv->paint_volume,
+-                                         &priv->visible_paint_volume);
+-      _clutter_paint_volume_transform_relative (&priv->visible_paint_volume,
+-                                                NULL); /* eye coordinates */
+-    }
++      ensure_paint_volume (self);
++
++      if (priv->has_paint_volume)
++        {
++          _clutter_paint_volume_copy_static (&priv->paint_volume,
++                                             &priv->visible_paint_volume);
++          _clutter_paint_volume_transform_relative (&priv->visible_paint_volume,
++                                                    NULL); /* eye coordinates */
++        }
+ 
+-  priv->visible_paint_volume_valid = priv->has_paint_volume;
++      priv->visible_paint_volume_valid = priv->has_paint_volume;
++      priv->needs_visible_paint_volume_update = FALSE;
++    }
+ 
+   if (priv->needs_update_stage_views)
+     {
+-- 
+GitLab
+
+
+From 59b49258259ee1c9eae20f4db46d7ee7d8a5fef7 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Jonas=20Dre=C3=9Fler?= <verdre@v0yd.nl>
+Date: Mon, 17 Oct 2022 17:18:27 +0200
+Subject: [PATCH 16/23] clutter/actor: Refactor redraw clip to be centered
+ around ClutterActor
+
+So far our logic for queueing redraws goes like this: Actor notices that it
+needs to redraw -> actor tells stage that it needs to redraw via
+clutter_stage_queue_actor_redraw() -> stage collects more and more redraws
+into a QueueRedrawList before the actual stage update happens -> when
+that happens, the stage collects the actual redraw clips from the actors via
+clutter_actor_get_redraw_clip().
+
+The logic behind this QueueRedrawList was that by storing a list of
+redraw entries on the stage, way we can avoid traversing the whole actor
+tree one more time to build the redraw clip before the stage update.
+
+These days we have clutter_actor_finish_layout() though, which is basically
+exactly that, a whole actor tree traversal that happens before every stage
+update.
+
+Since we have that now, we might as well get rid of the whole dance back and
+forth between ClutterStage and ClutterActor, and simply merge the logic to
+queue redraws into the finish-layout step.
+
+Part-of: <https://gitlab.gnome.org/GNOME/mutter/-/merge_requests/2679>
+
+(cherry picked from commit 699e1b305bc06dc19319b923b6a6185d6ab0dde2)
+---
+ clutter/clutter/clutter-actor-private.h |   4 -
+ clutter/clutter/clutter-actor.c         | 138 ++++++++++++-------
+ clutter/clutter/clutter-stage-private.h |  11 +-
+ clutter/clutter/clutter-stage-view.c    |   1 -
+ clutter/clutter/clutter-stage.c         | 175 +-----------------------
+ 5 files changed, 94 insertions(+), 235 deletions(-)
+
+diff --git a/clutter/clutter/clutter-actor-private.h b/clutter/clutter/clutter-actor-private.h
+index 8f87f15ffab..a2b4b9f7437 100644
+--- a/clutter/clutter/clutter-actor-private.h
++++ b/clutter/clutter/clutter-actor-private.h
+@@ -266,10 +266,6 @@ void clutter_actor_queue_immediate_relayout (ClutterActor *self);
+ 
+ gboolean clutter_actor_is_painting_unmapped (ClutterActor *self);
+ 
+-gboolean clutter_actor_get_redraw_clip (ClutterActor       *self,
+-                                        ClutterPaintVolume *dst_old_pv,
+-                                        ClutterPaintVolume *dst_new_pv);
+-
+ void clutter_actor_attach_grab (ClutterActor *actor,
+                                 ClutterGrab  *grab);
+ void clutter_actor_detach_grab (ClutterActor *actor,
+diff --git a/clutter/clutter/clutter-actor.c b/clutter/clutter/clutter-actor.c
+index c3bb36e1cb5..60b6cc08031 100644
+--- a/clutter/clutter/clutter-actor.c
++++ b/clutter/clutter/clutter-actor.c
+@@ -805,6 +805,8 @@ struct _ClutterActorPrivate
+   unsigned int n_pointers;
+   unsigned int implicitly_grabbed_count;
+ 
++  GSList *next_redraw_clips;
++
+   /* bitfields: KEEP AT THE END */
+ 
+   /* fixed position and sizes */
+@@ -847,6 +849,7 @@ struct _ClutterActorPrivate
+   guint had_effects_on_last_paint_volume_update : 1;
+   guint needs_update_stage_views    : 1;
+   guint clear_stage_views_needs_stage_views_changed : 1;
++  guint needs_redraw : 1;
+ };
+ 
+ enum
+@@ -2146,9 +2149,6 @@ unrealize_actor_after_children_cb (ClutterActor *self,
+       priv->parent->flags & CLUTTER_ACTOR_NO_LAYOUT)
+     clutter_stage_dequeue_actor_relayout (CLUTTER_STAGE (stage), self);
+ 
+-  if (stage != NULL)
+-    clutter_stage_dequeue_actor_redraw (CLUTTER_STAGE (stage), self);
+-
+   if (priv->unmapped_paint_branch_counter == 0)
+     priv->allocation = (ClutterActorBox) CLUTTER_ACTOR_BOX_UNINITIALIZED;
+ 
+@@ -5528,6 +5528,7 @@ clutter_actor_dispose (GObject *object)
+     }
+ 
+   g_clear_pointer (&priv->stage_views, g_list_free);
++  g_clear_slist (&priv->next_redraw_clips, (GDestroyNotify) clutter_paint_volume_free);
+ 
+   G_OBJECT_CLASS (clutter_actor_parent_class)->dispose (object);
+ }
+@@ -7675,29 +7676,6 @@ _clutter_actor_queue_redraw_full (ClutterActor             *self,
+   ClutterActorPrivate *priv = self->priv;
+   ClutterActor *stage;
+ 
+-  /* Here's an outline of the actor queue redraw mechanism:
+-   *
+-   * The process starts in clutter_actor_queue_redraw() which is a
+-   * wrapper for this function. Additionally, an effect can queue a
+-   * redraw by wrapping this function in clutter_effect_queue_repaint().
+-   *
+-   * This functions queues an entry in a list associated with the
+-   * stage which is a list of actors that queued a redraw while
+-   * updating the timelines, performing layouting and processing other
+-   * mainloop sources before the next paint starts.
+-   *
+-   * When all updates are complete and we come to paint the stage then
+-   * we iterate this list and build the redraw clip of the stage by
+-   * either using the clip that was supplied to
+-   * _clutter_actor_queue_redraw_full() or by asking the actor for its
+-   * redraw clip using clutter_actor_get_redraw_clip().
+-   *
+-   * Doing this later during the stage update instead of now is an
+-   * important optimization, because later it's more likely we will be
+-   * able to determine the paint volume of an actor (its allocation
+-   * should be up to date).
+-   */
+-
+   /* ignore queueing a redraw for actors being destroyed */
+   if (CLUTTER_ACTOR_IN_DESTRUCTION (self))
+     return;
+@@ -7732,9 +7710,33 @@ _clutter_actor_queue_redraw_full (ClutterActor             *self,
+   if (CLUTTER_ACTOR_IN_DESTRUCTION (stage))
+     return;
+ 
+-  clutter_stage_queue_actor_redraw (CLUTTER_STAGE (stage),
+-                                    self,
+-                                    volume);
++  if (priv->needs_redraw && !priv->next_redraw_clips)
++    {
++      /* priv->needs_redraw is TRUE while priv->next_redraw_clips is NULL, this
++       * means an unclipped redraw is already queued, no need to do anything.
++       */
++    }
++  else
++    {
++      if (!priv->needs_redraw)
++        {
++          priv->needs_redraw = TRUE;
++
++          clutter_stage_schedule_update (CLUTTER_STAGE (stage));
++        }
++
++      if (volume)
++        {
++          ClutterPaintVolume *clip_pv = _clutter_paint_volume_new (self);
++
++          _clutter_paint_volume_set_from_volume (clip_pv, volume);
++          priv->next_redraw_clips = g_slist_prepend (priv->next_redraw_clips, clip_pv);
++        }
++      else
++        {
++          g_clear_slist (&priv->next_redraw_clips, (GDestroyNotify) clutter_paint_volume_free);
++        }
++    }
+ 
+   /* If this is the first redraw queued then we can directly use the
+      effect parameter */
+@@ -15390,6 +15392,48 @@ clutter_actor_get_resource_scale (ClutterActor *self)
+   return ceilf (clutter_actor_get_real_resource_scale (self));
+ }
+ 
++static void
++add_actor_to_redraw_clip (ClutterActor       *self,
++                          gboolean            actor_moved,
++                          ClutterPaintVolume *old_visible_paint_volume)
++{
++  ClutterActorPrivate *priv = self->priv;
++  ClutterStage *stage = CLUTTER_STAGE (_clutter_actor_get_stage_internal (self));
++
++  if (priv->next_redraw_clips)
++    {
++      GSList *l;
++
++      for (l = priv->next_redraw_clips; l; l = l->next)
++        clutter_stage_add_to_redraw_clip (stage, l->data);
++
++      g_clear_slist (&priv->next_redraw_clips, (GDestroyNotify) clutter_paint_volume_free);
++    }
++  else if (actor_moved)
++    {
++      /* For a clipped redraw to work we need both the old paint volume and the new
++       * one, if any is missing we'll need to do an unclipped redraw.
++       */
++      if (old_visible_paint_volume == NULL || !priv->visible_paint_volume_valid)
++        goto full_stage_redraw;
++
++      clutter_stage_add_to_redraw_clip (stage, old_visible_paint_volume);
++      clutter_stage_add_to_redraw_clip (stage, &priv->visible_paint_volume);
++    }
++  else
++    {
++      if (!priv->visible_paint_volume_valid)
++        goto full_stage_redraw;
++
++      clutter_stage_add_to_redraw_clip (stage, &priv->visible_paint_volume);
++    }
++
++  return;
++
++full_stage_redraw:
++  clutter_stage_add_to_redraw_clip (stage, NULL);
++}
++
+ static gboolean
+ sorted_lists_equal (GList *list_a,
+                     GList *list_b)
+@@ -15485,6 +15529,9 @@ clutter_actor_finish_layout (ClutterActor *self,
+ {
+   ClutterActorPrivate *priv = self->priv;
+   ClutterActor *child;
++  gboolean actor_moved = FALSE;
++  gboolean old_visible_paint_volume_valid = FALSE;
++  ClutterPaintVolume old_visible_paint_volume;
+ 
+   if ((!CLUTTER_ACTOR_IS_MAPPED (self) &&
+        !clutter_actor_has_mapped_clones (self)) ||
+@@ -15495,6 +15542,10 @@ clutter_actor_finish_layout (ClutterActor *self,
+     {
+       ensure_paint_volume (self);
+ 
++      actor_moved = TRUE;
++      old_visible_paint_volume = priv->visible_paint_volume;
++      old_visible_paint_volume_valid = priv->visible_paint_volume_valid;
++
+       if (priv->has_paint_volume)
+         {
+           _clutter_paint_volume_copy_static (&priv->paint_volume,
+@@ -15515,6 +15566,14 @@ clutter_actor_finish_layout (ClutterActor *self,
+       priv->needs_update_stage_views = FALSE;
+     }
+ 
++  if (priv->needs_redraw)
++    {
++      add_actor_to_redraw_clip (self,
++                                actor_moved,
++                                old_visible_paint_volume_valid ? &old_visible_paint_volume : NULL);
++      priv->needs_redraw = FALSE;
++    }
++
+   for (child = priv->first_child; child; child = child->priv->next_sibling)
+     clutter_actor_finish_layout (child, use_max_scale);
+ }
+@@ -19079,27 +19138,6 @@ clutter_actor_invalidate_paint_volume (ClutterActor *self)
+   queue_update_paint_volume (self);
+ }
+ 
+-gboolean
+-clutter_actor_get_redraw_clip (ClutterActor       *self,
+-                               ClutterPaintVolume *dst_old_pv,
+-                               ClutterPaintVolume *dst_new_pv)
+-{
+-  ClutterActorPrivate *priv = self->priv;
+-
+-  ensure_paint_volume (self);
+-
+-  /* For a clipped redraw to work we need both the old paint volume and the new
+-   * one, if any is missing we'll need to do an unclipped redraw.
+-   */
+-  if (!priv->visible_paint_volume_valid || !priv->has_paint_volume)
+-    return FALSE;
+-
+-  _clutter_paint_volume_set_from_volume (dst_old_pv, &priv->visible_paint_volume);
+-  _clutter_paint_volume_set_from_volume (dst_new_pv, &priv->paint_volume);
+-
+-  return TRUE;
+-}
+-
+ void
+ clutter_actor_attach_grab (ClutterActor *self,
+                            ClutterGrab  *grab)
+diff --git a/clutter/clutter/clutter-stage-private.h b/clutter/clutter/clutter-stage-private.h
+index 271e17c86ed..b17b63be99a 100644
+--- a/clutter/clutter/clutter-stage-private.h
++++ b/clutter/clutter/clutter-stage-private.h
+@@ -82,7 +82,6 @@ CLUTTER_EXPORT
+ void                _clutter_stage_maybe_setup_viewport  (ClutterStage          *stage,
+                                                           ClutterStageView      *view);
+ void                clutter_stage_maybe_relayout         (ClutterActor          *stage);
+-void                clutter_stage_maybe_finish_queue_redraws (ClutterStage      *stage);
+ GSList *            clutter_stage_find_updated_devices   (ClutterStage          *stage,
+                                                           ClutterStageView      *view);
+ void                clutter_stage_update_devices         (ClutterStage          *stage,
+@@ -101,13 +100,6 @@ gboolean _clutter_stage_has_full_redraw_queued            (ClutterStage *stage);
+ ClutterPaintVolume *_clutter_stage_paint_volume_stack_allocate (ClutterStage *stage);
+ void                _clutter_stage_paint_volume_stack_free_all (ClutterStage *stage);
+ 
+-void clutter_stage_queue_actor_redraw (ClutterStage             *stage,
+-                                       ClutterActor             *actor,
+-                                       const ClutterPaintVolume *clip);
+-
+-void clutter_stage_dequeue_actor_redraw (ClutterStage *stage,
+-                                         ClutterActor *actor);
+-
+ void            _clutter_stage_add_pointer_drag_actor    (ClutterStage       *stage,
+                                                           ClutterInputDevice *device,
+                                                           ClutterActor       *actor);
+@@ -184,6 +176,9 @@ void clutter_stage_notify_action_implicit_grab (ClutterStage         *self,
+                                                 ClutterInputDevice   *device,
+                                                 ClutterEventSequence *sequence);
+ 
++void clutter_stage_add_to_redraw_clip (ClutterStage       *self,
++                                       ClutterPaintVolume *clip);
++
+ G_END_DECLS
+ 
+ #endif /* __CLUTTER_STAGE_PRIVATE_H__ */
+diff --git a/clutter/clutter/clutter-stage-view.c b/clutter/clutter/clutter-stage-view.c
+index 5f66d60322b..7d11789f1e7 100644
+--- a/clutter/clutter/clutter-stage-view.c
++++ b/clutter/clutter/clutter-stage-view.c
+@@ -1250,7 +1250,6 @@ handle_frame_clock_frame (ClutterFrameClock *frame_clock,
+   clutter_stage_emit_before_update (stage, view, frame);
+ 
+   clutter_stage_maybe_relayout (CLUTTER_ACTOR (stage));
+-  clutter_stage_maybe_finish_queue_redraws (stage);
+ 
+   clutter_stage_finish_layout (stage);
+ 
+diff --git a/clutter/clutter/clutter-stage.c b/clutter/clutter/clutter-stage.c
+index 4afb5b7054b..6320b65a8c6 100644
+--- a/clutter/clutter/clutter-stage.c
++++ b/clutter/clutter/clutter-stage.c
+@@ -75,11 +75,6 @@
+ 
+ #define MAX_FRUSTA 64
+ 
+-typedef struct _QueueRedrawEntry
+-{
+-  GSList *clips;
+-} QueueRedrawEntry;
+-
+ typedef struct _PickRecord
+ {
+   graphene_point_t vertex[4];
+@@ -139,12 +134,9 @@ struct _ClutterStagePrivate
+   GArray *paint_volume_stack;
+ 
+   GSList *pending_relayouts;
+-  GHashTable *pending_queue_redraws;
+ 
+   int update_freeze_count;
+ 
+-  gboolean pending_finish_queue_redraws;
+-
+   GHashTable *pointer_devices;
+   GHashTable *touch_sequences;
+ 
+@@ -193,7 +185,6 @@ static guint stage_signals[LAST_SIGNAL] = { 0, };
+ 
+ static const ClutterColor default_stage_color = { 255, 255, 255, 255 };
+ 
+-static void free_queue_redraw_entry (QueueRedrawEntry *entry);
+ static void free_pointer_device_entry (PointerDeviceEntry *entry);
+ static void free_event_receiver (EventReceiver *receiver);
+ static void clutter_stage_update_view_perspective (ClutterStage *stage);
+@@ -924,7 +915,6 @@ clutter_stage_finish_layout (ClutterStage *stage)
+ 
+       priv->actor_needs_immediate_relayout = FALSE;
+       clutter_stage_maybe_relayout (actor);
+-      clutter_stage_maybe_finish_queue_redraws (stage);
+     }
+ 
+   g_warn_if_fail (!priv->actor_needs_immediate_relayout);
+@@ -1216,8 +1206,6 @@ clutter_stage_dispose (GObject *object)
+ 
+   clutter_actor_destroy_all_children (CLUTTER_ACTOR (object));
+ 
+-  g_hash_table_remove_all (priv->pending_queue_redraws);
+-
+   g_slist_free_full (priv->pending_relayouts,
+                      (GDestroyNotify) g_object_unref);
+   priv->pending_relayouts = NULL;
+@@ -1621,11 +1609,6 @@ clutter_stage_init (ClutterStage *self)
+   clutter_stage_set_key_focus (self, NULL);
+   clutter_stage_set_viewport (self, geom.width, geom.height);
+ 
+-  priv->pending_queue_redraws =
+-    g_hash_table_new_full (NULL, NULL,
+-                           g_object_unref,
+-                           (GDestroyNotify) free_queue_redraw_entry);
+-
+   priv->paint_volume_stack =
+     g_array_new (FALSE, FALSE, sizeof (ClutterPaintVolume));
+ }
+@@ -2408,7 +2391,7 @@ gboolean
+ clutter_stage_is_redraw_queued_on_view (ClutterStage     *stage,
+                                         ClutterStageView *view)
+ {
+-  clutter_stage_maybe_finish_queue_redraws (stage);
++  clutter_stage_finish_layout (stage);
+ 
+   return clutter_stage_view_has_redraw_clip (view);
+ }
+@@ -2503,90 +2486,9 @@ _clutter_stage_paint_volume_stack_free_all (ClutterStage *stage)
+   g_array_set_size (paint_volume_stack, 0);
+ }
+ 
+-/* When an actor queues a redraw we add it to a list on the stage that
+- * gets processed once all updates to the stage have been finished.
+- *
+- * This deferred approach to processing queue_redraw requests means
+- * that we can avoid redundant transformations of clip volumes if
+- * something later triggers a full stage redraw anyway. It also means
+- * we can be more sure that all the referenced actors will have valid
+- * allocations improving the chance that we can determine the actors
+- * paint volume so we can clip the redraw request even if the user
+- * didn't explicitly do so.
+- */
+-void
+-clutter_stage_queue_actor_redraw (ClutterStage             *stage,
+-                                  ClutterActor             *actor,
+-                                  const ClutterPaintVolume *clip)
+-{
+-  ClutterStagePrivate *priv = stage->priv;
+-  QueueRedrawEntry *entry = NULL;
+-
+-  CLUTTER_NOTE (CLIPPING, "stage_queue_actor_redraw (actor=%s, clip=%p): ",
+-                _clutter_actor_get_debug_name (actor), clip);
+-
+-  if (!priv->pending_finish_queue_redraws)
+-    {
+-      GList *l;
+-
+-      for (l = clutter_stage_peek_stage_views (stage); l; l = l->next)
+-        {
+-          ClutterStageView *view = l->data;
+-
+-          clutter_stage_view_schedule_update (view);
+-        }
+-
+-      priv->pending_finish_queue_redraws = TRUE;
+-    }
+-
+-  entry = g_hash_table_lookup (priv->pending_queue_redraws, actor);
+-
+-  if (!entry)
+-    {
+-      entry = g_new0 (QueueRedrawEntry, 1);
+-      g_hash_table_insert (priv->pending_queue_redraws,
+-                           g_object_ref (actor), entry);
+-    }
+-  else if (!entry->clips)
+-    {
+-      CLUTTER_NOTE (CLIPPING, "Bail from stage_queue_actor_redraw (%s): "
+-                    "Unclipped redraw of actor already queued",
+-                    _clutter_actor_get_debug_name (actor));
+-      return;
+-    }
+-
+-  /* If queuing a clipped redraw then append the latest
+-   * clip to the clip list */
+-  if (clip)
+-    {
+-      ClutterPaintVolume *clip_pv = _clutter_paint_volume_new (actor);
+-
+-      _clutter_paint_volume_set_from_volume (clip_pv, clip);
+-      entry->clips = g_slist_prepend (entry->clips, clip_pv);
+-    }
+-  else
+-    {
+-      g_clear_slist (&entry->clips, (GDestroyNotify) clutter_paint_volume_free);
+-    }
+-}
+-
+-static void
+-free_queue_redraw_entry (QueueRedrawEntry *entry)
+-{
+-  g_clear_slist (&entry->clips, (GDestroyNotify) clutter_paint_volume_free);
+-  g_free (entry);
+-}
+-
+ void
+-clutter_stage_dequeue_actor_redraw (ClutterStage *self,
+-                                    ClutterActor *actor)
+-{
+-  g_hash_table_remove (self->priv->pending_queue_redraws, actor);
+-}
+-
+-static void
+-add_to_stage_clip (ClutterStage       *stage,
+-                   ClutterPaintVolume *redraw_clip)
++clutter_stage_add_to_redraw_clip (ClutterStage       *stage,
++                                  ClutterPaintVolume *redraw_clip)
+ {
+   ClutterStageWindow *stage_window;
+   ClutterActorBox bounding_box;
+@@ -2639,77 +2541,6 @@ add_to_stage_clip (ClutterStage       *stage,
+   clutter_stage_add_redraw_clip (stage, &stage_clip);
+ }
+ 
+-void
+-clutter_stage_maybe_finish_queue_redraws (ClutterStage *stage)
+-{
+-  ClutterStagePrivate *priv = stage->priv;
+-  GHashTableIter iter;
+-  gpointer key, value;
+-
+-  COGL_TRACE_BEGIN_SCOPED (ClutterStageFinishQueueRedraws, "FinishQueueRedraws");
+-
+-  if (!priv->pending_finish_queue_redraws)
+-    return;
+-
+-  priv->pending_finish_queue_redraws = FALSE;
+-
+-  g_hash_table_iter_init (&iter, priv->pending_queue_redraws);
+-  while (g_hash_table_iter_next (&iter, &key, &value))
+-    {
+-      ClutterActor *redraw_actor = key;
+-      QueueRedrawEntry *entry = value;
+-
+-      g_hash_table_iter_steal (&iter);
+-
+-      if (clutter_actor_is_mapped (redraw_actor))
+-        {
+-          ClutterPaintVolume old_actor_pv, new_actor_pv;
+-
+-          _clutter_paint_volume_init_static (&old_actor_pv, NULL);
+-          _clutter_paint_volume_init_static (&new_actor_pv, NULL);
+-
+-          if (entry->clips)
+-            {
+-              GSList *l;
+-
+-              for (l = entry->clips; l; l = l->next)
+-                add_to_stage_clip (stage, l->data);
+-            }
+-          else if (clutter_actor_get_redraw_clip (redraw_actor,
+-                                                  &old_actor_pv,
+-                                                  &new_actor_pv))
+-            {
+-              /* Add both the old paint volume of the actor (which is
+-               * currently visible on the screen) and the new paint volume
+-               * (which will be visible on the screen after this redraw)
+-               * to the redraw clip.
+-               * The former we do to ensure the old texture on the screen
+-               * will be fully painted over in case the actor was moved.
+-               */
+-              add_to_stage_clip (stage, &old_actor_pv);
+-              add_to_stage_clip (stage, &new_actor_pv);
+-            }
+-          else
+-            {
+-              /* If there's no clip we can use, we have to trigger an
+-               * unclipped full stage redraw.
+-               */
+-              add_to_stage_clip (stage, NULL);
+-            }
+-        }
+-
+-      g_object_unref (redraw_actor);
+-      free_queue_redraw_entry (entry);
+-
+-      /* get_paint_volume() vfuncs might queue redraws and can cause our
+-       * iterator to now be invalidated. So start over. This isn't wasting
+-       * any time since we already stole (removed) the elements previously
+-       * visited.
+-       */
+-      g_hash_table_iter_init (&iter, priv->pending_queue_redraws);
+-    }
+-}
+-
+ void
+ _clutter_stage_add_pointer_drag_actor (ClutterStage       *stage,
+                                        ClutterInputDevice *device,
+-- 
+GitLab
+
+
+From 0fb319ced0befca0376116148e67b3f200f57ef4 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Jonas=20Dre=C3=9Fler?= <verdre@v0yd.nl>
+Date: Thu, 25 May 2023 15:43:31 +0200
+Subject: [PATCH 17/23] clutter/actor: Use GArray to store redraw clips
+
+Using a list of heap allocated ClutterPaintVolumes adds quite a bit of
+unnecessary overhead: It means for every single redraw clip we allocate a
+list and a paint volume on the heap.
+
+Let's avoid all those heap allocations by using a GArray with static
+ClutterPaintVolumes instead.
+
+Part-of: <https://gitlab.gnome.org/GNOME/mutter/-/merge_requests/2679>
+
+(cherry picked from commit d2d730ec0b3446b6e1e080ac6ddfd4b3ffad161f)
+---
+ clutter/clutter/clutter-actor.c | 32 ++++++++++++++------------------
+ 1 file changed, 14 insertions(+), 18 deletions(-)
+
+diff --git a/clutter/clutter/clutter-actor.c b/clutter/clutter/clutter-actor.c
+index 60b6cc08031..cf05ff5dd61 100644
+--- a/clutter/clutter/clutter-actor.c
++++ b/clutter/clutter/clutter-actor.c
+@@ -805,7 +805,7 @@ struct _ClutterActorPrivate
+   unsigned int n_pointers;
+   unsigned int implicitly_grabbed_count;
+ 
+-  GSList *next_redraw_clips;
++  GArray *next_redraw_clips;
+ 
+   /* bitfields: KEEP AT THE END */
+ 
+@@ -5528,7 +5528,7 @@ clutter_actor_dispose (GObject *object)
+     }
+ 
+   g_clear_pointer (&priv->stage_views, g_list_free);
+-  g_clear_slist (&priv->next_redraw_clips, (GDestroyNotify) clutter_paint_volume_free);
++  g_clear_pointer (&priv->next_redraw_clips, g_array_unref);
+ 
+   G_OBJECT_CLASS (clutter_actor_parent_class)->dispose (object);
+ }
+@@ -7615,6 +7615,9 @@ clutter_actor_init (ClutterActor *self)
+    */
+   priv->needs_compute_expand = FALSE;
+ 
++  priv->next_redraw_clips =
++    g_array_sized_new (FALSE, TRUE, sizeof (ClutterPaintVolume), 3);
++
+   /* we start with an easing state with duration forcibly set
+    * to 0, for backward compatibility.
+    */
+@@ -7710,9 +7713,9 @@ _clutter_actor_queue_redraw_full (ClutterActor             *self,
+   if (CLUTTER_ACTOR_IN_DESTRUCTION (stage))
+     return;
+ 
+-  if (priv->needs_redraw && !priv->next_redraw_clips)
++  if (priv->needs_redraw && priv->next_redraw_clips->len == 0)
+     {
+-      /* priv->needs_redraw is TRUE while priv->next_redraw_clips is NULL, this
++      /* priv->needs_redraw is TRUE while priv->next_redraw_clips->len is 0, this
+        * means an unclipped redraw is already queued, no need to do anything.
+        */
+     }
+@@ -7726,16 +7729,9 @@ _clutter_actor_queue_redraw_full (ClutterActor             *self,
+         }
+ 
+       if (volume)
+-        {
+-          ClutterPaintVolume *clip_pv = _clutter_paint_volume_new (self);
+-
+-          _clutter_paint_volume_set_from_volume (clip_pv, volume);
+-          priv->next_redraw_clips = g_slist_prepend (priv->next_redraw_clips, clip_pv);
+-        }
++        g_array_append_val (priv->next_redraw_clips, *volume);
+       else
+-        {
+-          g_clear_slist (&priv->next_redraw_clips, (GDestroyNotify) clutter_paint_volume_free);
+-        }
++        priv->next_redraw_clips->len = 0;
+     }
+ 
+   /* If this is the first redraw queued then we can directly use the
+@@ -15400,14 +15396,14 @@ add_actor_to_redraw_clip (ClutterActor       *self,
+   ClutterActorPrivate *priv = self->priv;
+   ClutterStage *stage = CLUTTER_STAGE (_clutter_actor_get_stage_internal (self));
+ 
+-  if (priv->next_redraw_clips)
++  if (priv->next_redraw_clips->len != 0)
+     {
+-      GSList *l;
++      unsigned int i;
+ 
+-      for (l = priv->next_redraw_clips; l; l = l->next)
+-        clutter_stage_add_to_redraw_clip (stage, l->data);
++      for (i = 0; i < priv->next_redraw_clips->len; i++)
++        clutter_stage_add_to_redraw_clip (stage, &g_array_index (priv->next_redraw_clips, ClutterPaintVolume, i));
+ 
+-      g_clear_slist (&priv->next_redraw_clips, (GDestroyNotify) clutter_paint_volume_free);
++      priv->next_redraw_clips->len = 0;
+     }
+   else if (actor_moved)
+     {
+-- 
+GitLab
+
+
+From 567cd9366a6a125be70545f0c0593423c107ba75 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Jonas=20Dre=C3=9Fler?= <verdre@v0yd.nl>
+Date: Wed, 24 May 2023 20:09:25 +0200
+Subject: [PATCH 18/23] clutter/stage: Avoid queueing stage updates when
+ they're already queued
+
+We're using clutter_stage_schedule_update() now from ClutterActor to kick
+off the stage updating machinery when a redraw needs to happen.
+
+This introduced a bunch of unnecessary calls to
+clutter_stage_schedule_update() and thus
+clutter_stage_view_schedule_update() when multiple actors request redraws
+during the same stage update cycle, which is a very common case.
+
+Cut off all those unnecessary calls by bailing out in
+clutter_stage_schedule_update() when updates are already queued.
+
+Part-of: <https://gitlab.gnome.org/GNOME/mutter/-/merge_requests/2679>
+
+(cherry picked from commit 261f516af4e635d4bb263bbbbb2f843f0cbe09de)
+---
+ clutter/clutter/clutter-stage-private.h |  2 +-
+ clutter/clutter/clutter-stage-view.c    |  2 +-
+ clutter/clutter/clutter-stage.c         | 30 ++++++++++++++++---------
+ 3 files changed, 22 insertions(+), 12 deletions(-)
+
+diff --git a/clutter/clutter/clutter-stage-private.h b/clutter/clutter/clutter-stage-private.h
+index b17b63be99a..e7e0cbce428 100644
+--- a/clutter/clutter/clutter-stage-private.h
++++ b/clutter/clutter/clutter-stage-private.h
+@@ -60,7 +60,7 @@ void                clutter_stage_emit_before_paint      (ClutterStage
+ void                clutter_stage_emit_after_paint       (ClutterStage          *stage,
+                                                           ClutterStageView      *view,
+                                                           ClutterFrame          *frame);
+-void                clutter_stage_emit_after_update      (ClutterStage          *stage,
++void                clutter_stage_after_update           (ClutterStage          *stage,
+                                                           ClutterStageView      *view,
+                                                           ClutterFrame          *frame);
+ 
+diff --git a/clutter/clutter/clutter-stage-view.c b/clutter/clutter/clutter-stage-view.c
+index 7d11789f1e7..81216440c2f 100644
+--- a/clutter/clutter/clutter-stage-view.c
++++ b/clutter/clutter/clutter-stage-view.c
+@@ -1280,7 +1280,7 @@ handle_frame_clock_frame (ClutterFrameClock *frame_clock,
+   priv->needs_update_devices = FALSE;
+ 
+   _clutter_run_repaint_functions (CLUTTER_REPAINT_FLAGS_POST_PAINT);
+-  clutter_stage_emit_after_update (stage, view, frame);
++  clutter_stage_after_update (stage, view, frame);
+ 
+   return clutter_frame_get_result (frame);
+ }
+diff --git a/clutter/clutter/clutter-stage.c b/clutter/clutter/clutter-stage.c
+index 6320b65a8c6..b4a188f471e 100644
+--- a/clutter/clutter/clutter-stage.c
++++ b/clutter/clutter/clutter-stage.c
+@@ -137,6 +137,8 @@ struct _ClutterStagePrivate
+ 
+   int update_freeze_count;
+ 
++  gboolean update_scheduled;
++
+   GHashTable *pointer_devices;
+   GHashTable *touch_sequences;
+ 
+@@ -505,11 +507,15 @@ clutter_stage_emit_after_paint (ClutterStage     *stage,
+ }
+ 
+ void
+-clutter_stage_emit_after_update (ClutterStage     *stage,
+-                                 ClutterStageView *view,
+-                                 ClutterFrame     *frame)
++clutter_stage_after_update (ClutterStage     *stage,
++                            ClutterStageView *view,
++                            ClutterFrame     *frame)
+ {
++  ClutterStagePrivate *priv = stage->priv;
++
+   g_signal_emit (stage, stage_signals[AFTER_UPDATE], 0, view, frame);
++
++  priv->update_scheduled = FALSE;
+ }
+ 
+ static gboolean
+@@ -620,19 +626,15 @@ _clutter_stage_queue_event (ClutterStage *stage,
+                             gboolean      copy_event)
+ {
+   ClutterStagePrivate *priv;
+-  gboolean first_event;
+ 
+   g_return_if_fail (CLUTTER_IS_STAGE (stage));
+ 
+   priv = stage->priv;
+ 
+-  first_event = priv->event_queue->length == 0;
+-
+   g_queue_push_tail (priv->event_queue,
+                      copy_event ? clutter_event_copy (event) : event);
+ 
+-  if (first_event)
+-    clutter_stage_schedule_update (stage);
++  clutter_stage_schedule_update (stage);
+ }
+ 
+ gboolean
+@@ -765,8 +767,7 @@ clutter_stage_queue_actor_relayout (ClutterStage *stage,
+ {
+   ClutterStagePrivate *priv = stage->priv;
+ 
+-  if (priv->pending_relayouts == NULL)
+-    clutter_stage_schedule_update (stage);
++  clutter_stage_schedule_update (stage);
+ 
+   priv->pending_relayouts = g_slist_prepend (priv->pending_relayouts,
+                                              g_object_ref (actor));
+@@ -2439,12 +2440,19 @@ _clutter_stage_get_default_window (void)
+ void
+ clutter_stage_schedule_update (ClutterStage *stage)
+ {
++  ClutterStagePrivate *priv = stage->priv;
+   ClutterStageWindow *stage_window;
++  gboolean first_event;
+   GList *l;
+ 
+   if (CLUTTER_ACTOR_IN_DESTRUCTION (stage))
+     return;
+ 
++  first_event = priv->event_queue->length == 0;
++
++  if (priv->update_scheduled && !first_event)
++    return;
++
+   stage_window = _clutter_stage_get_window (stage);
+   if (stage_window == NULL)
+     return;
+@@ -2455,6 +2463,8 @@ clutter_stage_schedule_update (ClutterStage *stage)
+ 
+       clutter_stage_view_schedule_update (view);
+     }
++
++  priv->update_scheduled = TRUE;
+ }
+ 
+ ClutterPaintVolume *
+-- 
+GitLab
+
+
+From 167793853f6b4242237523048f3e6d22a92610cc Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Jonas=20Dre=C3=9Fler?= <verdre@v0yd.nl>
+Date: Mon, 17 Oct 2022 18:22:30 +0200
+Subject: [PATCH 19/23] clutter/actor: Avoid always traversing actor tree on
+ finish_layout
+
+With commit 5a565b42586abb0c851888b827ffabc0cce38b75, we changed
+clutter_actor_finish_layout() to be not only about updating stage views,
+but also take care of updating the visible_paint_volume, for that we
+started doing a full tree traversal of all mapped actors.
+
+This can be quite a performance issue, apparently especially on certain
+ARM devices, where the simple tree traversal can take as long as 2ms.
+This is precious time we need to paint our next frame, so lets do a bit
+more work to avoid those useless traversals.
+
+Fixes https://gitlab.gnome.org/GNOME/mutter/-/issues/2459
+
+Part-of: <https://gitlab.gnome.org/GNOME/mutter/-/merge_requests/2679>
+
+(cherry picked from commit 4579e86330282101abc10ce6b97fe0437229a5f1)
+---
+ clutter/clutter/clutter-actor.c | 35 +++++++++++++++++++++++++++++++++
+ 1 file changed, 35 insertions(+)
+
+diff --git a/clutter/clutter/clutter-actor.c b/clutter/clutter/clutter-actor.c
+index cf05ff5dd61..48cb549ce43 100644
+--- a/clutter/clutter/clutter-actor.c
++++ b/clutter/clutter/clutter-actor.c
+@@ -850,6 +850,7 @@ struct _ClutterActorPrivate
+   guint needs_update_stage_views    : 1;
+   guint clear_stage_views_needs_stage_views_changed : 1;
+   guint needs_redraw : 1;
++  guint needs_finish_layout : 1;
+ };
+ 
+ enum
+@@ -1511,6 +1512,7 @@ queue_update_paint_volume (ClutterActor *actor)
+     {
+       actor->priv->needs_paint_volume_update = TRUE;
+       actor->priv->needs_visible_paint_volume_update = TRUE;
++      actor->priv->needs_finish_layout = TRUE;
+       actor = actor->priv->parent;
+     }
+ }
+@@ -1530,6 +1532,19 @@ clutter_actor_real_map (ClutterActor *self)
+ 
+   if (priv->unmapped_paint_branch_counter == 0)
+     {
++      /* Invariant that needs_finish_layout is set all the way up to the stage
++       * needs to be met.
++       */
++      if (priv->needs_finish_layout)
++        {
++          iter = priv->parent;
++          while (iter && !iter->priv->needs_finish_layout)
++            {
++              iter->priv->needs_finish_layout = TRUE;
++              iter = iter->priv->parent;
++            }
++        }
++
+       /* Avoid the early return in clutter_actor_queue_relayout() */
+       priv->needs_width_request = FALSE;
+       priv->needs_height_request = FALSE;
+@@ -2479,6 +2494,11 @@ absolute_geometry_changed (ClutterActor *actor)
+ {
+   actor->priv->needs_update_stage_views = TRUE;
+   actor->priv->needs_visible_paint_volume_update = TRUE;
++
++  actor->priv->needs_finish_layout = TRUE;
++  /* needs_finish_layout is already TRUE on the whole parent tree thanks
++   * to queue_update_paint_volume() that was called by transform_changed().
++   */
+ }
+ 
+ static ClutterActorTraverseVisitFlags
+@@ -7589,6 +7609,7 @@ clutter_actor_init (ClutterActor *self)
+   priv->needs_paint_volume_update = TRUE;
+   priv->needs_visible_paint_volume_update = TRUE;
+   priv->needs_update_stage_views = TRUE;
++  priv->needs_finish_layout = TRUE;
+ 
+   priv->cached_width_age = 1;
+   priv->cached_height_age = 1;
+@@ -7723,9 +7744,17 @@ _clutter_actor_queue_redraw_full (ClutterActor             *self,
+     {
+       if (!priv->needs_redraw)
+         {
++          ClutterActor *iter = self;
++
+           priv->needs_redraw = TRUE;
+ 
+           clutter_stage_schedule_update (CLUTTER_STAGE (stage));
++
++          while (iter && !iter->priv->needs_finish_layout)
++            {
++              iter->priv->needs_finish_layout = TRUE;
++              iter = iter->priv->parent;
++            }
+         }
+ 
+       if (volume)
+@@ -15253,6 +15282,7 @@ clear_stage_views_cb (ClutterActor *actor,
+     _clutter_actor_stop_transitions (actor);
+ 
+   actor->priv->needs_update_stage_views = TRUE;
++  actor->priv->needs_finish_layout = TRUE;
+ 
+   old_stage_views = g_steal_pointer (&actor->priv->stage_views);
+ 
+@@ -15529,6 +15559,9 @@ clutter_actor_finish_layout (ClutterActor *self,
+   gboolean old_visible_paint_volume_valid = FALSE;
+   ClutterPaintVolume old_visible_paint_volume;
+ 
++  if (!priv->needs_finish_layout)
++    return;
++
+   if ((!CLUTTER_ACTOR_IS_MAPPED (self) &&
+        !clutter_actor_has_mapped_clones (self)) ||
+       CLUTTER_ACTOR_IN_DESTRUCTION (self))
+@@ -15570,6 +15603,8 @@ clutter_actor_finish_layout (ClutterActor *self,
+       priv->needs_redraw = FALSE;
+     }
+ 
++  priv->needs_finish_layout = FALSE;
++
+   for (child = priv->first_child; child; child = child->priv->next_sibling)
+     clutter_actor_finish_layout (child, use_max_scale);
+ }
+-- 
+GitLab
+
+
+From f749b9c873608ecbd08c4f11f6771e19cb30ca30 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Jonas=20Dre=C3=9Fler?= <verdre@v0yd.nl>
+Date: Sun, 5 Jun 2022 16:59:15 +0200
+Subject: [PATCH 20/23] clutter/actor: Cache absolute modelview matrices
+
+While we're now doing a fairly good job at not needing those matrices
+all the time anymore, we still need it multiple times during every paint
+cycle, so it definitely makes sense to introduce some caching here.
+
+Part-of: <https://gitlab.gnome.org/GNOME/mutter/-/merge_requests/2679>
+
+(cherry picked from commit 2ef4960b4f62044ccbdaf6dee698853f67b81c6f)
+---
+ clutter/clutter/clutter-actor.c | 31 +++++++++++++++++++++++++++++--
+ 1 file changed, 29 insertions(+), 2 deletions(-)
+
+diff --git a/clutter/clutter/clutter-actor.c b/clutter/clutter/clutter-actor.c
+index 48cb549ce43..af5536dace2 100644
+--- a/clutter/clutter/clutter-actor.c
++++ b/clutter/clutter/clutter-actor.c
+@@ -689,6 +689,8 @@ struct _ClutterActorPrivate
+   /* the cached transformation matrix; see apply_transform() */
+   graphene_matrix_t transform;
+ 
++  graphene_matrix_t absolute_modelview;
++
+   float resource_scale;
+ 
+   guint8 opacity;
+@@ -851,6 +853,7 @@ struct _ClutterActorPrivate
+   guint clear_stage_views_needs_stage_views_changed : 1;
+   guint needs_redraw : 1;
+   guint needs_finish_layout : 1;
++  guint absolute_modelview_valid : 1;
+ };
+ 
+ enum
+@@ -2494,6 +2497,7 @@ absolute_geometry_changed (ClutterActor *actor)
+ {
+   actor->priv->needs_update_stage_views = TRUE;
+   actor->priv->needs_visible_paint_volume_update = TRUE;
++  actor->priv->absolute_modelview_valid = FALSE;
+ 
+   actor->priv->needs_finish_layout = TRUE;
+   /* needs_finish_layout is already TRUE on the whole parent tree thanks
+@@ -2878,8 +2882,6 @@ clutter_actor_apply_transform_to_point (ClutterActor             *self,
+  * instead.
+  *
+  */
+-/* XXX: We should consider caching the stage relative modelview along with
+- * the actor itself */
+ void
+ clutter_actor_get_relative_transformation_matrix (ClutterActor      *self,
+                                                   ClutterActor      *ancestor,
+@@ -3119,6 +3121,30 @@ _clutter_actor_apply_relative_transformation_matrix (ClutterActor      *self,
+   if (self == ancestor)
+     return;
+ 
++  if (ancestor == NULL)
++    {
++      ClutterActorPrivate *priv = self->priv;
++
++      if (!priv->absolute_modelview_valid)
++        {
++          graphene_matrix_init_identity (&priv->absolute_modelview);
++
++          if (priv->parent != NULL)
++            {
++              _clutter_actor_apply_relative_transformation_matrix (priv->parent,
++                                                                   NULL,
++                                                                   &priv->absolute_modelview);
++            }
++
++          _clutter_actor_apply_modelview_transform (self, &priv->absolute_modelview);
++
++          priv->absolute_modelview_valid = TRUE;
++        }
++
++      graphene_matrix_multiply (&priv->absolute_modelview, matrix, matrix);
++      return;
++    }
++
+   if (self->priv->parent != NULL)
+     _clutter_actor_apply_relative_transformation_matrix (self->priv->parent,
+                                                          ancestor,
+@@ -7618,6 +7644,7 @@ clutter_actor_init (ClutterActor *self)
+   priv->enable_model_view_transform = TRUE;
+ 
+   priv->transform_valid = FALSE;
++  priv->absolute_modelview_valid = FALSE;
+ 
+   /* the default is to stretch the content, to match the
+    * current behaviour of basically all actors. also, it's
+-- 
+GitLab
+
+
+From 332567d907bcf1a813705f7acd12ff0f7848f81f Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Jonas=20Dre=C3=9Fler?= <verdre@v0yd.nl>
+Date: Thu, 25 May 2023 17:59:27 +0200
+Subject: [PATCH 21/23] clutter/actor: Don't store a second stage-views list
+ for the stage
+
+The stage already maintains its own list of stage-views via
+clutter_stage_peek_stage_views(), it's a bit superfluous to copy that list
+around all the time into priv->stage_views of ClutterActor. Let's deal with
+that by returning clutter_stage_peek_stage_views() when
+clutter_actor_peek_stage_views() gets called for the stage.
+
+In order to make sure ClutterActor::stage-views-changed still gets emitted
+correctly for the stage, always emit that signal on the ClutterStage when
+the stage views get invalidated. This now depends on the backend only
+actually invalidating the views and calling
+clutter_stage_clear_stage_views() when things have actually changed, but
+that should be the case.
+
+This needs a change in one of the stage-views tests, namely the one which
+tests stage-view-changed emission on the stage: Here we now see an emission
+of stage-views-changed, but that signal emission actually seems correct.
+
+Part-of: <https://gitlab.gnome.org/GNOME/mutter/-/merge_requests/2679>
+
+(cherry picked from commit 26344fb5332c252071027612b6134677d0c7e942)
+---
+ clutter/clutter/clutter-actor.c | 18 ++++++++++--------
+ src/tests/stage-view-tests.c    |  5 ++++-
+ 2 files changed, 14 insertions(+), 9 deletions(-)
+
+diff --git a/clutter/clutter/clutter-actor.c b/clutter/clutter/clutter-actor.c
+index af5536dace2..82065e7b212 100644
+--- a/clutter/clutter/clutter-actor.c
++++ b/clutter/clutter/clutter-actor.c
+@@ -5738,11 +5738,10 @@ static float
+ clutter_actor_real_calculate_resource_scale (ClutterActor *self,
+                                              int           phase)
+ {
+-  ClutterActorPrivate *priv = self->priv;
+   GList *l;
+   float new_resource_scale = -1.f;
+ 
+-  for (l = priv->stage_views; l; l = l->next)
++  for (l = clutter_actor_peek_stage_views (self); l; l = l->next)
+     {
+       ClutterStageView *view = l->data;
+ 
+@@ -15313,7 +15312,7 @@ clear_stage_views_cb (ClutterActor *actor,
+ 
+   old_stage_views = g_steal_pointer (&actor->priv->stage_views);
+ 
+-  if (old_stage_views)
++  if (old_stage_views || CLUTTER_ACTOR_IS_TOPLEVEL (actor))
+     actor->priv->clear_stage_views_needs_stage_views_changed = TRUE;
+ 
+   return CLUTTER_ACTOR_TRAVERSE_VISIT_CONTINUE;
+@@ -15518,6 +15517,9 @@ update_stage_views (ClutterActor *self)
+   ClutterStage *stage;
+   graphene_rect_t bounding_rect;
+ 
++  if (CLUTTER_ACTOR_IS_TOPLEVEL (self))
++    return;
++
+   stage = CLUTTER_STAGE (_clutter_actor_get_stage_internal (self));
+   g_return_if_fail (stage);
+ 
+@@ -15665,7 +15667,9 @@ clutter_actor_peek_stage_views (ClutterActor *self)
+ {
+   g_return_val_if_fail (CLUTTER_IS_ACTOR (self), FALSE);
+ 
+-  return self->priv->stage_views;
++  return CLUTTER_ACTOR_IS_TOPLEVEL (self)
++    ? clutter_stage_peek_stage_views (CLUTTER_STAGE (self))
++    : self->priv->stage_views;
+ }
+ 
+ gboolean
+@@ -15680,7 +15684,7 @@ clutter_actor_is_effectively_on_stage_view (ClutterActor     *self,
+       !clutter_actor_has_mapped_clones (self))
+     return FALSE;
+ 
+-  if (g_list_find (self->priv->stage_views, view))
++  if (g_list_find (clutter_actor_peek_stage_views (self), view))
+     return TRUE;
+ 
+   for (actor = self; actor; actor = actor->priv->parent)
+@@ -15737,9 +15741,7 @@ clutter_actor_pick_frame_clock (ClutterActor  *self,
+   ClutterStageView *best_view = NULL;
+   GList *l;
+ 
+-  stage_views_list = CLUTTER_IS_STAGE (self)
+-    ? clutter_stage_peek_stage_views (CLUTTER_STAGE (self))
+-    : priv->stage_views;
++  stage_views_list = clutter_actor_peek_stage_views (self);
+ 
+   if (!stage_views_list)
+     {
+diff --git a/src/tests/stage-view-tests.c b/src/tests/stage-view-tests.c
+index 221e933ef27..6a659ef310f 100644
+--- a/src/tests/stage-view-tests.c
++++ b/src/tests/stage-view-tests.c
+@@ -1241,6 +1241,9 @@ meta_test_timeline_actor_destroyed (void)
+                     G_CALLBACK (on_stage_views_changed),
+                     &did_stage_views_changed);
+ 
++  stage_views = clutter_stage_peek_stage_views (CLUTTER_STAGE (stage));
++  g_assert_cmpint (g_list_length (stage_views), ==, 0);
++
+   clutter_actor_destroy (actor);
+   g_object_unref (timeline);
+ 
+@@ -1249,7 +1252,7 @@ meta_test_timeline_actor_destroyed (void)
+   stage_views = clutter_stage_peek_stage_views (CLUTTER_STAGE (stage));
+   g_assert_cmpint (g_list_length (stage_views), ==, 1);
+ 
+-  g_assert_false (did_stage_views_changed);
++  g_assert_true (did_stage_views_changed);
+   clutter_actor_queue_redraw (persistent_actor);
+   clutter_stage_schedule_update (CLUTTER_STAGE (stage));
+   wait_for_paint (stage);
+-- 
+GitLab
+
+
+From 563efb92a18daa073724cd95203da4808c3f7fa0 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Jonas=20Dre=C3=9Fler?= <verdre@v0yd.nl>
+Date: Thu, 25 May 2023 16:41:39 +0200
+Subject: [PATCH 22/23] clutter/actor: Return NULL instead of FALSE when type
+ check fails
+
+Fix a small oversight in clutter_actor_peek_stage_views(), it should return
+NULL instead of FALSE when the check fails.
+
+Part-of: <https://gitlab.gnome.org/GNOME/mutter/-/merge_requests/2679>
+
+(cherry picked from commit b408be0b1e32b0993e3dcb6fa402ed519395d043)
+---
+ clutter/clutter/clutter-actor.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/clutter/clutter/clutter-actor.c b/clutter/clutter/clutter-actor.c
+index 82065e7b212..d07f4f4dd73 100644
+--- a/clutter/clutter/clutter-actor.c
++++ b/clutter/clutter/clutter-actor.c
+@@ -15665,7 +15665,7 @@ clutter_actor_finish_layout (ClutterActor *self,
+ GList *
+ clutter_actor_peek_stage_views (ClutterActor *self)
+ {
+-  g_return_val_if_fail (CLUTTER_IS_ACTOR (self), FALSE);
++  g_return_val_if_fail (CLUTTER_IS_ACTOR (self), NULL);
+ 
+   return CLUTTER_ACTOR_IS_TOPLEVEL (self)
+     ? clutter_stage_peek_stage_views (CLUTTER_STAGE (self))
+-- 
+GitLab
+
+
+From cf37934dcf7a9d02fa97e7e145bef967c7a88bcb Mon Sep 17 00:00:00 2001
+From: Robert Mader <robert.mader@collabora.com>
+Date: Sat, 27 May 2023 19:44:01 +0200
+Subject: [PATCH 23/23] clutter/actor: Some code-style fixes
+
+Part-of: <https://gitlab.gnome.org/GNOME/mutter/-/merge_requests/2679>
+
+(cherry picked from commit c36f3f0101ca61e7a89294b5c6f28f06559e56ab)
+---
+ clutter/clutter/clutter-actor.c | 16 ++++++++--------
+ 1 file changed, 8 insertions(+), 8 deletions(-)
+
+diff --git a/clutter/clutter/clutter-actor.c b/clutter/clutter/clutter-actor.c
+index d07f4f4dd73..d494896df3d 100644
+--- a/clutter/clutter/clutter-actor.c
++++ b/clutter/clutter/clutter-actor.c
+@@ -2150,8 +2150,8 @@ unrealize_actor_before_children_cb (ClutterActor *self,
+ 
+ static ClutterActorTraverseVisitFlags
+ unrealize_actor_after_children_cb (ClutterActor *self,
+-                                   int depth,
+-                                   void *user_data)
++                                   int           depth,
++                                   void         *user_data)
+ {
+   ClutterActorPrivate *priv = self->priv;
+   ClutterActor *stage = user_data;
+@@ -5504,9 +5504,9 @@ clutter_actor_dispose (GObject *object)
+   ClutterBackend *backend = clutter_get_default_backend ();
+ 
+   CLUTTER_NOTE (MISC, "Dispose actor (name='%s', ref_count:%d) of type '%s'",
+-		_clutter_actor_get_debug_name (self),
++                _clutter_actor_get_debug_name (self),
+                 object->ref_count,
+-		g_type_name (G_OBJECT_TYPE (self)));
++                g_type_name (G_OBJECT_TYPE (self)));
+ 
+   maybe_unset_key_focus (self);
+ 
+@@ -15745,10 +15745,10 @@ clutter_actor_pick_frame_clock (ClutterActor  *self,
+ 
+   if (!stage_views_list)
+     {
+-     if (priv->parent)
+-       return clutter_actor_pick_frame_clock (priv->parent, out_actor);
+-     else
+-       return NULL;
++      if (priv->parent)
++        return clutter_actor_pick_frame_clock (priv->parent, out_actor);
++      else
++        return NULL;
+     }
+ 
+   for (l = stage_views_list; l; l = l->next)
+-- 
+GitLab
+

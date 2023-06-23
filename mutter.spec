@@ -1,13 +1,3 @@
-## START: Set by rpmautospec
-## (rpmautospec version 0.3.5)
-## RPMAUTOSPEC: autorelease, autochangelog
-%define autorelease(e:s:pb:n) %{?-p:0.}%{lua:
-    release_number = 1;
-    base_release_number = tonumber(rpm.expand("%{?-b*}%{!?-b:1}"));
-    print(release_number + base_release_number - 1);
-}%{?-e:.%{-e*}}%{?-s:.%{-s*}}%{!?-n:%{?dist}}
-## END: Set by rpmautospec
-
 %global glib_version 2.75.1
 %global gtk3_version 3.19.8
 %global gtk4_version 4.0.0

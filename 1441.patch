@@ -1,7 +1,7 @@
-From a6165f1524192bf74e06c3a0f5bb7bdeb84fa1a8 Mon Sep 17 00:00:00 2001
+From 58baa5255b8635ad6cd647fd3ec11c0a6b7b849f Mon Sep 17 00:00:00 2001
 From: Daniel van Vugt <daniel.van.vugt@canonical.com>
 Date: Mon, 16 Aug 2021 17:06:43 +0800
-Subject: [PATCH 01/41] kms/update: Hold a reference to the buffer used in a
+Subject: [PATCH 01/46] kms/update: Hold a reference to the buffer used in a
  plane assignment
 
 ---
@@ -33,10 +33,10 @@ index ceb298a80..02d9d0159 100644
 2.41.0
 
 
-From 52cabbed7dae0d3227cfe9d49c5eb58cb11bb57d Mon Sep 17 00:00:00 2001
+From 80e663b36e6da46535a9575950a7cebc651adc84 Mon Sep 17 00:00:00 2001
 From: Daniel van Vugt <daniel.van.vugt@canonical.com>
 Date: Mon, 16 Aug 2021 18:04:10 +0800
-Subject: [PATCH 02/41] native: Introduce MetaSwapChain to hold plane buffer
+Subject: [PATCH 02/46] native: Introduce MetaSwapChain to hold plane buffer
  references
 
 ---
@@ -257,7 +257,7 @@ index 000000000..bad772b89
 +
 +#endif /* META_SWAP_CHAIN_H */
 diff --git a/src/meson.build b/src/meson.build
-index a4fe0850c..ec7617944 100644
+index 5e95e666f..5fc6b4e4a 100644
 --- a/src/meson.build
 +++ b/src/meson.build
 @@ -820,6 +820,8 @@ if have_native_backend
@@ -273,10 +273,10 @@ index a4fe0850c..ec7617944 100644
 2.41.0
 
 
-From 8ed67ee7e7ba132f9baace0c2076c0370eb7f65d Mon Sep 17 00:00:00 2001
+From 4ef17cf05c135ca60c5bfe6b529bb19f8548378b Mon Sep 17 00:00:00 2001
 From: Daniel van Vugt <daniel.van.vugt@canonical.com>
 Date: Wed, 18 Jan 2023 18:42:01 +0800
-Subject: [PATCH 03/41] kms/crtc: Add a local swap chain
+Subject: [PATCH 03/46] kms/crtc: Add a local swap chain
 
 ---
  src/backends/native/meta-kms-crtc.c | 21 +++++++++++++++++++++
@@ -371,10 +371,10 @@ index 25fb71edb..61013bebd 100644
 2.41.0
 
 
-From b8c39026695063937493012111297fbd4a20f1a5 Mon Sep 17 00:00:00 2001
+From 2aae3c0cf36d82f2c68d804f70f8a528e55d9c8c Mon Sep 17 00:00:00 2001
 From: Daniel van Vugt <daniel.van.vugt@canonical.com>
 Date: Tue, 17 Aug 2021 16:35:18 +0800
-Subject: [PATCH 04/41] kms/page-flip: Pump the CRTC's buffer reference queue
+Subject: [PATCH 04/46] kms/page-flip: Pump the CRTC's buffer reference queue
  on scanout
 
 Precise timing of this call is not important. We only need to notify
@@ -409,10 +409,10 @@ index c1c29905c..09c2d8fad 100644
 2.41.0
 
 
-From 19432dc5a87bb9bfc334829c677d2be0bc563a09 Mon Sep 17 00:00:00 2001
+From 318c76d526ed7d32cc4d1d53c6828cc5f2d61ec8 Mon Sep 17 00:00:00 2001
 From: Daniel van Vugt <daniel.van.vugt@canonical.com>
 Date: Wed, 9 Feb 2022 16:44:09 +0800
-Subject: [PATCH 05/41] kms/impl-device: Release buffers from MetaKmsCrtc in
+Subject: [PATCH 05/46] kms/impl-device: Release buffers from MetaKmsCrtc in
  prepare_shutdown
 
 This allows them to release their buffers cleanly while all the
@@ -456,10 +456,10 @@ index d56636d55..b7a0ddd24 100644
 2.41.0
 
 
-From 4b41ea4ab8da1d86929e705ba4f7876bed112ff3 Mon Sep 17 00:00:00 2001
+From 512ab36b631e05f997c88bb063a5e2773882b7c9 Mon Sep 17 00:00:00 2001
 From: Daniel van Vugt <daniel.van.vugt@canonical.com>
 Date: Tue, 7 Dec 2021 18:31:16 +0800
-Subject: [PATCH 06/41] kms/impl-device/simple: Pump the CRTC's buffer
+Subject: [PATCH 06/46] kms/impl-device/simple: Pump the CRTC's buffer
  reference queue on scanout
 
 In this case "on scanout" means when `drmModeSetCrtc` succeeds. This is
@@ -495,10 +495,10 @@ index 341d54cc7..e292573a7 100644
 2.41.0
 
 
-From c04487339917e60a7ff9f59851db980e81d91fa6 Mon Sep 17 00:00:00 2001
+From 220f564c65bba70dd3111eaa01e61d98458d9424 Mon Sep 17 00:00:00 2001
 From: Daniel van Vugt <daniel.van.vugt@canonical.com>
 Date: Tue, 17 Aug 2021 17:40:57 +0800
-Subject: [PATCH 07/41] kms/impl-device/simple: Keep a reference to buffers
+Subject: [PATCH 07/46] kms/impl-device/simple: Keep a reference to buffers
  assigned to planes
 
 The MetaKmsCrtc will hold these references during future scanouts until
@@ -547,10 +547,10 @@ index e292573a7..8e4646ca1 100644
 2.41.0
 
 
-From 881806b1495c0e086bad49c9fe614167f5b64914 Mon Sep 17 00:00:00 2001
+From 7d9063978f94b6cb7255abaa1e1bd7de42b2246b Mon Sep 17 00:00:00 2001
 From: Daniel van Vugt <daniel.van.vugt@canonical.com>
 Date: Tue, 7 Dec 2021 17:54:15 +0800
-Subject: [PATCH 08/41] kms/impl-device/simple: Keep a reference to buffers
+Subject: [PATCH 08/46] kms/impl-device/simple: Keep a reference to buffers
  needed in retries
 
 ---
@@ -649,10 +649,10 @@ index 8e4646ca1..c739788ae 100644
 2.41.0
 
 
-From 80a4652a690d498a2d81b6439e98a51badcbc41a Mon Sep 17 00:00:00 2001
+From 23b90532951d8ccfcb8b4f7cf8d4f37561530c54 Mon Sep 17 00:00:00 2001
 From: Daniel van Vugt <daniel.van.vugt@canonical.com>
 Date: Tue, 17 Aug 2021 16:36:25 +0800
-Subject: [PATCH 09/41] kms/impl-device/atomic: Keep a reference to buffers
+Subject: [PATCH 09/46] kms/impl-device/atomic: Keep a reference to buffers
  assigned to planes
 
 The MetaKmsCrtc will hold these references during future scanouts until
@@ -700,10 +700,10 @@ index 83b217274..5024b876d 100644
 2.41.0
 
 
-From 61716980478269fdc108bb41b50df12467f84282 Mon Sep 17 00:00:00 2001
+From b4659c49433097f1e994985bb9cbd014b265069c Mon Sep 17 00:00:00 2001
 From: Daniel van Vugt <daniel.van.vugt@canonical.com>
 Date: Wed, 18 Aug 2021 15:04:27 +0800
-Subject: [PATCH 10/41] onscreen/native: Stop holding the current onscreen
+Subject: [PATCH 10/46] onscreen/native: Stop holding the current onscreen
  buffer
 
 The scanout lifetime of the buffer is now automatically managed via
@@ -836,10 +836,10 @@ index 1ab117eb9..b5e794e81 100644
 2.41.0
 
 
-From e9df1e0569c51a6d1c66c3bc4f7a58863fba095f Mon Sep 17 00:00:00 2001
+From bea58ce3c0c54dad1dcbf28d86ef4eacf34191b9 Mon Sep 17 00:00:00 2001
 From: Daniel van Vugt <daniel.van.vugt@canonical.com>
 Date: Thu, 2 Mar 2023 18:01:26 +0800
-Subject: [PATCH 11/41] FIXME: Temporary workaround for the scanout-failed
+Subject: [PATCH 11/46] FIXME: Temporary workaround for the scanout-failed
  signal
 
 ---
@@ -901,10 +901,10 @@ index b5e794e81..6a40355c5 100644
 2.41.0
 
 
-From 6d7b5aaa28227586884b6a63727b3528df5514a9 Mon Sep 17 00:00:00 2001
+From aeb71fd3baa947a3d6d6de242e22ace3fc495b77 Mon Sep 17 00:00:00 2001
 From: Daniel van Vugt <daniel.van.vugt@canonical.com>
 Date: Fri, 24 Sep 2021 21:49:45 +0800
-Subject: [PATCH 12/41] onscreen/native: Keep the onscreen alive longer than
+Subject: [PATCH 12/46] onscreen/native: Keep the onscreen alive longer than
  `MetaDrmBufferGbm`
 
 Because `MetaDrmBufferGbm` uses `gbm_surface` in its destructor and
@@ -941,10 +941,10 @@ index 6a40355c5..aa88d95ad 100644
 2.41.0
 
 
-From 44aa8ccf57d5dd89a5cf269250f40bef6c513046 Mon Sep 17 00:00:00 2001
+From 2afd8bb4cf12df5cd7388f7288e662630a6ebd62 Mon Sep 17 00:00:00 2001
 From: Daniel van Vugt <daniel.van.vugt@canonical.com>
 Date: Wed, 18 Aug 2021 15:59:16 +0800
-Subject: [PATCH 13/41] cursor-renderer/native: Stop holding onto historical
+Subject: [PATCH 13/46] cursor-renderer/native: Stop holding onto historical
  cursor buffers
 
 Their scanout lifetimes are now managed automatically via the call
@@ -1126,10 +1126,10 @@ index f1b7459fe..c4c7b0e84 100644
 2.41.0
 
 
-From 7b34fc3d25198980b2b02ff3731f70bf7a7dc488 Mon Sep 17 00:00:00 2001
+From c130cf7e973225d0f3a268aca860446ff49ceaa6 Mon Sep 17 00:00:00 2001
 From: Daniel van Vugt <daniel.van.vugt@canonical.com>
 Date: Wed, 18 Aug 2021 16:12:24 +0800
-Subject: [PATCH 14/41] cursor-renderer/native: Remove MetaCursorBufferState
+Subject: [PATCH 14/46] cursor-renderer/native: Remove MetaCursorBufferState
 
 It was theoretically useful for flagging when a NULL buffer had been
 SET, but in practice set_cursor_sprite_buffer is never called when the
@@ -1260,10 +1260,10 @@ index c4c7b0e84..8080098a0 100644
 2.41.0
 
 
-From 9fb767df99fb8765ad22390cf6b7bca555e044f4 Mon Sep 17 00:00:00 2001
+From 5e668d3fac61645c39f58580731469ffd267b214 Mon Sep 17 00:00:00 2001
 From: Daniel van Vugt <daniel.van.vugt@canonical.com>
 Date: Fri, 17 Sep 2021 17:48:20 +0800
-Subject: [PATCH 15/41] cogl/onscreen: Add function
+Subject: [PATCH 15/46] cogl/onscreen: Add function
  cogl_onscreen_count_pending_frames
 
 ---
@@ -1306,10 +1306,10 @@ index 842ececf7..1e2b11dee 100644
 2.41.0
 
 
-From 4032955721cea1570eb0048cb58104d064e8a7e1 Mon Sep 17 00:00:00 2001
+From b73fc71edc7bf57a11c07fbc1d826a8828310620 Mon Sep 17 00:00:00 2001
 From: Daniel van Vugt <daniel.van.vugt@canonical.com>
 Date: Wed, 20 Apr 2022 18:33:43 +0800
-Subject: [PATCH 16/41] kms: Keep a shutting_down flag
+Subject: [PATCH 16/46] kms: Keep a shutting_down flag
 
 ---
  src/backends/native/meta-kms.c | 9 +++++++++
@@ -1367,10 +1367,10 @@ index fe4fef1a0..88421ed28 100644
 2.41.0
 
 
-From fae72fc393efb34dc681086b038b4ac4d7742164 Mon Sep 17 00:00:00 2001
+From f96b853fb39ac9588ae0d5f4b8d9a163ef1e8893 Mon Sep 17 00:00:00 2001
 From: Daniel van Vugt <daniel.van.vugt@canonical.com>
 Date: Tue, 26 Oct 2021 18:50:50 +0800
-Subject: [PATCH 17/41] renderer/native: Avoid requeuing the same onscreen for
+Subject: [PATCH 17/46] renderer/native: Avoid requeuing the same onscreen for
  a power save flip
 
 This is a case that triple buffering will encounter. We don't want it
@@ -1401,10 +1401,10 @@ index 4da361e2b..930b4615d 100644
 2.41.0
 
 
-From c9153874bbc3af77da0ba8709d035250371d7d08 Mon Sep 17 00:00:00 2001
+From ffbd1ec9fff071611482d0c4588993cc61d2ef1d Mon Sep 17 00:00:00 2001
 From: Daniel van Vugt <daniel.van.vugt@canonical.com>
 Date: Mon, 1 Nov 2021 19:35:34 +0800
-Subject: [PATCH 18/41] renderer/native: Steal the power save flip list before
+Subject: [PATCH 18/46] renderer/native: Steal the power save flip list before
  iterating over it
 
 Because a single iteration might also grow the list again.
@@ -1441,10 +1441,10 @@ index 930b4615d..24e4c89ff 100644
 2.41.0
 
 
-From 7f8f243be65ceb939c6068c847e2d5c3396ca971 Mon Sep 17 00:00:00 2001
+From fb7b2ac87fcb635b73419ad83e6d5585d5528d02 Mon Sep 17 00:00:00 2001
 From: Daniel van Vugt <daniel.van.vugt@canonical.com>
 Date: Fri, 10 Dec 2021 16:40:58 +0800
-Subject: [PATCH 19/41] onscreen/native: Log swapbuffers and N-buffering when
+Subject: [PATCH 19/46] onscreen/native: Log swapbuffers and N-buffering when
  MUTTER_DEBUG=kms
 
 ---
@@ -1479,10 +1479,10 @@ index aa88d95ad..7e1f63526 100644
 2.41.0
 
 
-From 28d7b47b435569cac24f0c01882b268191f72136 Mon Sep 17 00:00:00 2001
+From 8b4e987e1d787310eafb9c75e5687dfa66145e8d Mon Sep 17 00:00:00 2001
 From: Daniel van Vugt <daniel.van.vugt@canonical.com>
 Date: Wed, 28 Jul 2021 16:35:56 +0800
-Subject: [PATCH 20/41] onscreen/native: Replace an assertion that double
+Subject: [PATCH 20/46] onscreen/native: Replace an assertion that double
  buffering is the maximum
 
 Because it soon won't be the maximum. But we do want to verify that the
@@ -1509,10 +1509,10 @@ index 7e1f63526..befa5b842 100644
 2.41.0
 
 
-From 4c55f806895e97c1a4c728b732461440a0f9ed8a Mon Sep 17 00:00:00 2001
+From dc462b6b6f88b3dca7ef7973260bd9307e5dddcb Mon Sep 17 00:00:00 2001
 From: Daniel van Vugt <daniel.van.vugt@canonical.com>
 Date: Thu, 16 Sep 2021 16:26:25 +0800
-Subject: [PATCH 21/41] onscreen/native: Deduplicate calls to
+Subject: [PATCH 21/46] onscreen/native: Deduplicate calls to
  clutter_frame_set_result
 
 All paths out of `meta_onscreen_native_swap_buffers_with_damage` from
@@ -1588,10 +1588,10 @@ index befa5b842..66bc27bd8 100644
 2.41.0
 
 
-From 5acbfd86dec8fb3d4fee4a2a19419d3a27162965 Mon Sep 17 00:00:00 2001
+From 9e883bb2ee11355ddc59f727a5a01b30c13513be Mon Sep 17 00:00:00 2001
 From: Daniel van Vugt <daniel.van.vugt@canonical.com>
 Date: Wed, 28 Jul 2021 16:29:27 +0800
-Subject: [PATCH 22/41] onscreen/native: Split swap_buffers_with_damage into
+Subject: [PATCH 22/46] onscreen/native: Split swap_buffers_with_damage into
  two functions
 
 1. The EGL part: meta_onscreen_native_swap_buffers_with_damage
@@ -1732,10 +1732,10 @@ index 66bc27bd8..4cf6505ad 100644
 2.41.0
 
 
-From 291e0ac3e3d6f2d8d6c260b0cdea1322a9d748d1 Mon Sep 17 00:00:00 2001
+From 6d7d178993e0617f4cfbcf4c637f959352162cd7 Mon Sep 17 00:00:00 2001
 From: Daniel van Vugt <daniel.van.vugt@canonical.com>
 Date: Thu, 28 Oct 2021 17:24:11 +0800
-Subject: [PATCH 23/41] onscreen/native: Add a missing frame notification
+Subject: [PATCH 23/46] onscreen/native: Add a missing frame notification
 
 In the unlikely event that swap_buffers_with_damage drops the previous swap
 it was forgetting to notify about the discarded frame. That could lead to
@@ -1768,10 +1768,10 @@ index 4cf6505ad..41b29b4ba 100644
 2.41.0
 
 
-From 4e1557a678bd2ab948e087e45f0b5e42719f88ac Mon Sep 17 00:00:00 2001
+From a2cfba959f2f95ea8b2c96460c7abcd39aed0183 Mon Sep 17 00:00:00 2001
 From: Daniel van Vugt <daniel.van.vugt@canonical.com>
 Date: Fri, 17 Sep 2021 17:59:28 +0800
-Subject: [PATCH 24/41] onscreen/native: Defer posting if there's already a
+Subject: [PATCH 24/46] onscreen/native: Defer posting if there's already a
  post in progress
 
 And when the number of pending posts decreases we know it's safe to submit
@@ -2075,10 +2075,10 @@ index 41b29b4ba..acfb19343 100644
 2.41.0
 
 
-From a55256d2cf183b70ac385509f05cc50423b4b9cb Mon Sep 17 00:00:00 2001
+From 86c082c658d18351b64150cdebe8247002985c94 Mon Sep 17 00:00:00 2001
 From: Daniel van Vugt <daniel.van.vugt@canonical.com>
 Date: Fri, 9 Dec 2022 14:22:31 +0800
-Subject: [PATCH 25/41] onscreen/native: Increase secondary GPU dumb_fbs from 2
+Subject: [PATCH 25/46] onscreen/native: Increase secondary GPU dumb_fbs from 2
  to 3
 
 So that they don't get overwritten prematurely during triple buffering
@@ -2128,10 +2128,10 @@ index acfb19343..67f415f69 100644
 2.41.0
 
 
-From 68f96562685abd55671baca53fbc65b1d49132ce Mon Sep 17 00:00:00 2001
+From 539e67c84baaa242774fbe077f7fe88c8d7e22ce Mon Sep 17 00:00:00 2001
 From: Daniel van Vugt <daniel.van.vugt@canonical.com>
 Date: Thu, 4 Nov 2021 16:09:26 +0800
-Subject: [PATCH 26/41] onscreen/native: Add function
+Subject: [PATCH 26/46] onscreen/native: Add function
  meta_onscreen_native_discard_pending_swaps
 
 ---
@@ -2178,10 +2178,10 @@ index 05a9ecdb8..a33ee3857 100644
 2.41.0
 
 
-From 879e6ef3d973f4d1b0bef4f4a2e98f7dcf43c524 Mon Sep 17 00:00:00 2001
+From 8282ae1ec71f9ac181450a545a8bd4e47bdafc60 Mon Sep 17 00:00:00 2001
 From: Daniel van Vugt <daniel.van.vugt@canonical.com>
 Date: Wed, 11 May 2022 16:00:32 +0800
-Subject: [PATCH 27/41] onscreen/native: Skip try_post_latest_swap if shutting
+Subject: [PATCH 27/46] onscreen/native: Skip try_post_latest_swap if shutting
  down
 
 Otherwise we could get:
@@ -2236,10 +2236,10 @@ index 229ed89e9..1c157ecf3 100644
 2.41.0
 
 
-From 302be96a7a7d5653986229a78adb3d6e7baf5bae Mon Sep 17 00:00:00 2001
+From d1c1ffd69fe6ba7cbbbd98b17ad0bc28d049fd00 Mon Sep 17 00:00:00 2001
 From: Daniel van Vugt <daniel.van.vugt@canonical.com>
 Date: Thu, 4 Nov 2021 16:09:52 +0800
-Subject: [PATCH 28/41] renderer/native: Discard pending swaps when rebuilding
+Subject: [PATCH 28/46] renderer/native: Discard pending swaps when rebuilding
  views
 
 It's analogous to discard_pending_page_flips but represents swaps that
@@ -2295,10 +2295,10 @@ index 24e4c89ff..e5d995388 100644
 2.41.0
 
 
-From f7db3557a7d40365ccef8e63ad3fcde67a35d810 Mon Sep 17 00:00:00 2001
+From 2fa5a9a24c4a4f91197b958d75d443162591b13c Mon Sep 17 00:00:00 2001
 From: Daniel van Vugt <daniel.van.vugt@canonical.com>
 Date: Tue, 10 Aug 2021 17:46:49 +0800
-Subject: [PATCH 29/41] clutter/frame-clock: Lower the threshold for disabling
+Subject: [PATCH 29/46] clutter/frame-clock: Lower the threshold for disabling
  error diffusion
 
 Error diffusion was introduced in 0555a5bbc15 for Nvidia where last
@@ -2344,10 +2344,10 @@ index 3aeb29042..625579311 100644
 2.41.0
 
 
-From 71644826c3092d692afd4a0061245639d922cf8a Mon Sep 17 00:00:00 2001
+From cb6d8a9d77fe8382bcb4f7195a01c10ddb8706cb Mon Sep 17 00:00:00 2001
 From: Daniel van Vugt <daniel.van.vugt@canonical.com>
 Date: Fri, 24 Jul 2020 14:13:11 +0800
-Subject: [PATCH 30/41] clutter/frame-clock: Merge states DISPATCHING and
+Subject: [PATCH 30/46] clutter/frame-clock: Merge states DISPATCHING and
  PENDING_PRESENTED
 
 Chronologically they already overlap in time as presentation may
@@ -2471,10 +2471,10 @@ index 625579311..6bf40ad0c 100644
 2.41.0
 
 
-From cf9b2a48b164aff544492b8d78f1a6410864019c Mon Sep 17 00:00:00 2001
+From 50c4b12cd4a8e5d07d48555be9d276e88d95ee6c Mon Sep 17 00:00:00 2001
 From: Daniel van Vugt <daniel.van.vugt@canonical.com>
 Date: Mon, 13 Dec 2021 17:03:44 +0800
-Subject: [PATCH 31/41] clutter/frame-clock: Don't clamp
+Subject: [PATCH 31/46] clutter/frame-clock: Don't clamp
  compute_max_render_time_us
 
 Because values over refresh_interval_us are real and valid. They
@@ -2500,10 +2500,10 @@ index 6bf40ad0c..e3dfc9560 100644
 2.41.0
 
 
-From 04624c6811d8040240236e8f9be8d409f5e92bda Mon Sep 17 00:00:00 2001
+From 65daffa7b56da2b722eccfd181089c5754c9a6c7 Mon Sep 17 00:00:00 2001
 From: Daniel van Vugt <daniel.van.vugt@canonical.com>
 Date: Thu, 10 Sep 2020 16:34:53 +0800
-Subject: [PATCH 32/41] clutter/frame-clock: Add triple buffering support
+Subject: [PATCH 32/46] clutter/frame-clock: Add triple buffering support
 
 ---
  clutter/clutter/clutter-frame-clock.c | 159 +++++++++++++++++++++-----
@@ -2828,10 +2828,10 @@ index e3dfc9560..c16cd36a6 100644
 2.41.0
 
 
-From 007acd837197a9b80b31661da655efef51db5ef7 Mon Sep 17 00:00:00 2001
+From 1fb715c8ccf72d315c01c5aabf11f068e3cc9fb8 Mon Sep 17 00:00:00 2001
 From: Daniel van Vugt <daniel.van.vugt@canonical.com>
 Date: Fri, 10 Dec 2021 16:28:04 +0800
-Subject: [PATCH 33/41] clutter/frame-clock: Log N-buffers in
+Subject: [PATCH 33/46] clutter/frame-clock: Log N-buffers in
  CLUTTTER_DEBUG=frame-timings
 
 ---
@@ -2879,10 +2879,10 @@ index c16cd36a6..6b70147c3 100644
 2.41.0
 
 
-From b28a614f6fdcddf5429dcf264cb0d05a35a0c7d2 Mon Sep 17 00:00:00 2001
+From fd7c9da46189394f14b7b1dccc8a3cb54a3ae889 Mon Sep 17 00:00:00 2001
 From: Daniel van Vugt <daniel.van.vugt@canonical.com>
 Date: Tue, 7 Sep 2021 19:08:15 +0800
-Subject: [PATCH 34/41] clutter/frame: Add ClutterFrameHint to ClutterFrame
+Subject: [PATCH 34/46] clutter/frame: Add ClutterFrameHint to ClutterFrame
 
 This will allow the backend to provide performance hints to the frame
 clock in future.
@@ -2965,10 +2965,10 @@ index 6bac3f4e4..fa97e8bd5 100644
 2.41.0
 
 
-From bff7e687086b75a68b8eabb1efcbed78ff68daf5 Mon Sep 17 00:00:00 2001
+From 39f33196762b97f5e10f7d85c5a279e9c055cbcc Mon Sep 17 00:00:00 2001
 From: Daniel van Vugt <daniel.van.vugt@canonical.com>
 Date: Tue, 7 Sep 2021 19:10:26 +0800
-Subject: [PATCH 35/41] backends: Flag that the frame attempted direct scanout
+Subject: [PATCH 35/46] backends: Flag that the frame attempted direct scanout
 
 We need this hint whether direct scanout succeeds or fails because it's
 the mechanism by which we will tell the clock to enforce double buffering,
@@ -2995,10 +2995,10 @@ index db94c7e40..aed22960c 100644
 2.41.0
 
 
-From ebc8eaf7db2f1147640fecac2591a40c4bfdfd20 Mon Sep 17 00:00:00 2001
+From 69d1266705be87b08682cf162e9dd52c612e404a Mon Sep 17 00:00:00 2001
 From: Daniel van Vugt <daniel.van.vugt@canonical.com>
 Date: Tue, 7 Sep 2021 19:15:18 +0800
-Subject: [PATCH 36/41] clutter: Pass ClutterFrameHint(s) to the frame clock
+Subject: [PATCH 36/46] clutter: Pass ClutterFrameHint(s) to the frame clock
 
 ---
  clutter/clutter/clutter-frame-clock.c | 8 ++++++--
@@ -3071,10 +3071,10 @@ index 5f66d6032..9e821155b 100644
 2.41.0
 
 
-From 9299cde94ec27d97ce68a3c3bac0be5bdcf054d4 Mon Sep 17 00:00:00 2001
+From c61bee25d7de6b5fc4ea4d825c88c786155bc013 Mon Sep 17 00:00:00 2001
 From: Daniel van Vugt <daniel.van.vugt@canonical.com>
 Date: Tue, 7 Sep 2021 19:15:55 +0800
-Subject: [PATCH 37/41] clutter/frame-clock: Throttle back to double buffering
+Subject: [PATCH 37/46] clutter/frame-clock: Throttle back to double buffering
  for direct scanout
 
 There's no compositing during direct scanout so the "render" time is zero.
@@ -3106,10 +3106,10 @@ index 5feb2065e..2227f75cd 100644
 2.41.0
 
 
-From ee711a81a882bde5c21bb274b0bb725031fb8733 Mon Sep 17 00:00:00 2001
+From 05ac039255bba5bbe973a242f5c2fa67fd9de4f1 Mon Sep 17 00:00:00 2001
 From: Daniel van Vugt <daniel.van.vugt@canonical.com>
 Date: Thu, 10 Mar 2022 16:44:14 +0800
-Subject: [PATCH 38/41] clutter/frame-clock: Add environment variable
+Subject: [PATCH 38/46] clutter/frame-clock: Add environment variable
  MUTTER_DEBUG_TRIPLE_BUFFERING
 
 With possible values {never, auto, always} where auto is the default.
@@ -3218,10 +3218,10 @@ index 2227f75cd..b1d6f7164 100644
 2.41.0
 
 
-From eb4f260f6921e65277ef1f0707ffdf39357438bb Mon Sep 17 00:00:00 2001
+From d1bf2f05a6bffcf1e3c7f06ffc73a396abeffee4 Mon Sep 17 00:00:00 2001
 From: Daniel van Vugt <daniel.van.vugt@canonical.com>
 Date: Thu, 30 Jun 2022 18:56:06 +0800
-Subject: [PATCH 39/41] tests/native-kms-render: Fix failing client-scanout
+Subject: [PATCH 39/46] tests/native-kms-render: Fix failing client-scanout
  test
 
 It was assuming an immediate transition from compositing (triple
@@ -3480,10 +3480,10 @@ index 1557b764e..c482d07e0 100644
 2.41.0
 
 
-From 41114c328e2f8b3f56b921884ff0a2ca1b3a99e9 Mon Sep 17 00:00:00 2001
+From c5bc8f4e8bf0edfba1936b85946aa562e8ac9868 Mon Sep 17 00:00:00 2001
 From: Daniel van Vugt <daniel.van.vugt@canonical.com>
 Date: Fri, 19 May 2023 14:31:07 +0800
-Subject: [PATCH 40/41] tests/clutter/event-delivery: Add a wait for
+Subject: [PATCH 40/46] tests/clutter/event-delivery: Add a wait for
  clutter_actor_destroy
 
 Because the destroy meant we were producing more frames/updates than
@@ -3511,10 +3511,10 @@ index 0f3ca256c..0c9fdf77b 100644
 2.41.0
 
 
-From 1e2436d15c717e9bc18dc6c11782ae806c3437cb Mon Sep 17 00:00:00 2001
+From e89d9d8d7255d93e2f11ee23028c522e73a54133 Mon Sep 17 00:00:00 2001
 From: Daniel van Vugt <daniel.van.vugt@canonical.com>
 Date: Wed, 24 May 2023 18:16:24 +0800
-Subject: [PATCH 41/41] onscreen/native: Avoid NULL dereference on resume from
+Subject: [PATCH 41/46] onscreen/native: Avoid NULL dereference on resume from
  suspend
 
 https://launchpad.net/bugs/2020652
@@ -3544,6 +3544,176 @@ index 1c157ecf3..a9765eda1 100644
  }
  
  static void
+-- 
+2.41.0
+
+
+From 98ace636db49afd3fc068c24349fddabc682af77 Mon Sep 17 00:00:00 2001
+From: Daniel van Vugt <daniel.van.vugt@canonical.com>
+Date: Fri, 9 Jun 2023 18:12:24 +0800
+Subject: [PATCH 42/46] clutter/frame-clock: Add CLUTTER_FRAME_HINT_NO_REDRAW
+
+---
+ clutter/clutter/clutter-frame-clock.h | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/clutter/clutter/clutter-frame-clock.h b/clutter/clutter/clutter-frame-clock.h
+index 6b44851a6..7f9f655c0 100644
+--- a/clutter/clutter/clutter-frame-clock.h
++++ b/clutter/clutter/clutter-frame-clock.h
+@@ -36,8 +36,9 @@ typedef enum _ClutterFrameResult
+ 
+ typedef enum _ClutterFrameHint
+ {
+-  CLUTTER_FRAME_HINT_NONE = 0,
++  CLUTTER_FRAME_HINT_NONE                     = 0,
+   CLUTTER_FRAME_HINT_DIRECT_SCANOUT_ATTEMPTED = 1 << 0,
++  CLUTTER_FRAME_HINT_NO_REDRAW                = 1 << 1,
+ } ClutterFrameHint;
+ 
+ #define CLUTTER_TYPE_FRAME_CLOCK (clutter_frame_clock_get_type ())
+-- 
+2.41.0
+
+
+From 701f7256abe463e3cd0792417676bb27fdba89bc Mon Sep 17 00:00:00 2001
+From: Daniel van Vugt <daniel.van.vugt@canonical.com>
+Date: Fri, 9 Jun 2023 17:48:05 +0800
+Subject: [PATCH 43/46] clutter: Record non-flips in the frame clock too
+
+Like for cursor-only updates. This is an easy way to let the frame clock
+know that we are not actually using the GPU on this frame.
+---
+ clutter/clutter/clutter-stage-view.c | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/clutter/clutter/clutter-stage-view.c b/clutter/clutter/clutter-stage-view.c
+index 9e821155b..41960fca4 100644
+--- a/clutter/clutter/clutter-stage-view.c
++++ b/clutter/clutter/clutter-stage-view.c
+@@ -1275,6 +1275,13 @@ handle_frame_clock_frame (ClutterFrameClock *frame_clock,
+       if (_clutter_context_get_show_fps ())
+         end_frame_timing_measurement (view);
+     }
++  else
++    {
++      clutter_frame_clock_record_flip (frame_clock,
++                                       g_get_monotonic_time (),
++                                       clutter_frame_get_hints (frame) |
++                                         CLUTTER_FRAME_HINT_NO_REDRAW);
++    }
+ 
+   _clutter_stage_window_finish_frame (stage_window, view, frame);
+ 
+-- 
+2.41.0
+
+
+From 1660bc87399fdd4a3d5a0530b51a3717c524b79d Mon Sep 17 00:00:00 2001
+From: Daniel van Vugt <daniel.van.vugt@canonical.com>
+Date: Fri, 9 Jun 2023 17:49:56 +0800
+Subject: [PATCH 44/46] clutter/frame-clock: Avoid entering triple buffering on
+ non-flip updates
+
+Like cursor-only updates.
+
+Fixes: https://launchpad.net/bugs/2023363
+---
+ clutter/clutter/clutter-frame-clock.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/clutter/clutter/clutter-frame-clock.c b/clutter/clutter/clutter-frame-clock.c
+index b1d6f7164..964215f76 100644
+--- a/clutter/clutter/clutter-frame-clock.c
++++ b/clutter/clutter/clutter-frame-clock.c
+@@ -485,7 +485,8 @@ clutter_frame_clock_compute_max_render_time_us (ClutterFrameClock *frame_clock)
+       int64_t ret = refresh_interval_us * SYNC_DELAY_FALLBACK_FRACTION;
+ 
+       if (frame_clock->state == CLUTTER_FRAME_CLOCK_STATE_DISPATCHED_ONE &&
+-          triple_buffering_mode != TRIPLE_BUFFERING_MODE_NEVER)
++          triple_buffering_mode != TRIPLE_BUFFERING_MODE_NEVER &&
++          !(frame_clock->last_flip_hints & CLUTTER_FRAME_HINT_NO_REDRAW))
+         ret += refresh_interval_us;
+ 
+       return ret;
+-- 
+2.41.0
+
+
+From 6f3605c8831e55f734a52fd7f6a13db8b842015b Mon Sep 17 00:00:00 2001
+From: Daniel van Vugt <daniel.van.vugt@canonical.com>
+Date: Wed, 14 Jun 2023 17:30:25 +0800
+Subject: [PATCH 45/46] onscreen/native: Don't drop next_post.frame when the
+ monitor is off
+
+This had two bad effects:
+
+1. Since `next_post.frame == NULL`, the first call to `try_post_latest_swap`
+   on resume would return immediately, failing to issue a mode set to
+   wake the screen.
+
+2. Failure to issue a notification for the dropped frame also seems to have
+   frozen the frame clock.
+
+This bug was only revealed in 44.1 because it seems to only happen when
+triple buffering cursor updates (which was also a bug LP#2023363 that
+only existed in 44.1).
+---
+ src/backends/native/meta-onscreen-native.c | 1 -
+ 1 file changed, 1 deletion(-)
+
+diff --git a/src/backends/native/meta-onscreen-native.c b/src/backends/native/meta-onscreen-native.c
+index a9765eda1..c507383e5 100644
+--- a/src/backends/native/meta-onscreen-native.c
++++ b/src/backends/native/meta-onscreen-native.c
+@@ -1294,7 +1294,6 @@ try_post_latest_swap (CoglOnscreen *onscreen)
+     }
+   else
+     {
+-      frame = g_steal_pointer (&onscreen_native->next_post.frame);
+       meta_renderer_native_queue_power_save_page_flip (renderer_native,
+                                                        onscreen);
+       return;
+-- 
+2.41.0
+
+
+From b6d6b32986b5d83ad9a5d8eca476de8b3ddd9b79 Mon Sep 17 00:00:00 2001
+From: Daniel van Vugt <daniel.van.vugt@canonical.com>
+Date: Thu, 22 Jun 2023 15:19:53 +0800
+Subject: [PATCH 46/46] onscreen/native: Avoid callbacks on "detached"
+ onscreens
+
+Detached onscreens have no valid view, or in this case a pointer to
+a deleted view. So record when the detach happens and avoid servicing
+callbacks on detached onscreens during/after sleep mode. As previously
+mentioned in 45bda2d969f.
+
+Fixes: https://launchpad.net/bugs/2020049
+---
+ src/backends/native/meta-onscreen-native.c | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/src/backends/native/meta-onscreen-native.c b/src/backends/native/meta-onscreen-native.c
+index c507383e5..ffe95f8da 100644
+--- a/src/backends/native/meta-onscreen-native.c
++++ b/src/backends/native/meta-onscreen-native.c
+@@ -1239,7 +1239,8 @@ try_post_latest_swap (CoglOnscreen *onscreen)
+   g_autoptr (ClutterFrame) frame = NULL;
+   MetaFrameNative *frame_native;
+ 
+-  if (onscreen_native->next_post.frame == NULL)
++  if (onscreen_native->next_post.frame == NULL ||
++      onscreen_native->view == NULL)
+     return;
+ 
+   if (meta_kms_is_shutting_down (kms))
+@@ -2660,4 +2661,5 @@ void
+ meta_onscreen_native_detach (MetaOnscreenNative *onscreen_native)
+ {
+   clear_invalidation_handlers (onscreen_native);
++  onscreen_native->view = NULL;
+ }
 -- 
 2.41.0
 

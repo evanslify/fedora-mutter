@@ -66,6 +66,9 @@ Patch5:        3053.patch
 Patch6:        3074.patch
 # Updated for triple buffering patch
 
+# https://gitlab.gnome.org/GNOME/mutter/-/merge_requests/3089
+Patch7:        3089.patch
+
 BuildRequires: pkgconfig(gobject-introspection-1.0) >= 1.41.0
 BuildRequires: pkgconfig(sm)
 BuildRequires: pkgconfig(libwacom)
